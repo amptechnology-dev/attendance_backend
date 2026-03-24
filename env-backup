@@ -1,0 +1,16 @@
+NODE_ENV=development
+MONGO_URI="mongodb+srv://amp:jdyR4CJ2xJQPpvlc@cluster0.498nw.mongodb.net/?retryWrites=true&w=majority&appName=Attendance"
+PORT=8001
+CORS_ORIGIN=http://localhost:3000
+
+ACCESS_TOKEN_SECRET=youraccesstokensecret
+REFRESH_TOKEN_SECRET=yourrefreshtokensecret
+ACCESS_TOKEN_EXPIRY=15m
+REFRESH_TOKEN_EXPIRY=7d
+
+COOKIE_SECRET=mycookiesecret
+COOKIE_DOMAIN=localhost
+
+LOG_PUSH_API_KEY=verysecretkey
+
+R2_BUCKET_NAME=cdn
