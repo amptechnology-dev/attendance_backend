@@ -9,6 +9,49 @@ import { generateOtp } from '../utils/randomStringGenarator.js';
 import axios from 'axios';
 import { Office } from '../models/office.model.js';
 
+export const getAllOffices = expressAsyncHandler(async (req, res) => {
+  const offices = await Office.find().select('name');
+  return new ApiResponse(200, offices, 'Offices retrieved successfully.').send(res);
+});
+
+export const registerAdmin = expressAsyncHandler(async (req, res) => {
+  const { office, username, password, mobile } = req.body;
+
+  if (!office || !username || !password || !mobile) {
+    throw new ApiError(400, 'office, username, password and mobile are required.');
+  }
+
+  const officeExists = await Office.findById(office);
+  if (!officeExists) {
+    throw new ApiError(404, 'Office not found.');
+  }
+
+  const existingUsername = await Admin.findOne({ username });
+  if (existingUsername) {
+    throw new ApiError(400, 'Username already exists.');
+  }
+
+  const existingMobile = await Admin.findOne({ mobile });
+  if (existingMobile) {
+    throw new ApiError(400, 'Mobile number already exists.');
+  }
+
+  const admin = await Admin.create({
+    office,
+    username,
+    password,
+    mobile,
+  });
+
+  const createdAdmin = await Admin.findById(admin._id).select('-password');
+
+  return new ApiResponse(
+    201,
+    createdAdmin,
+    'Admin registered successfully.'
+  ).send(res);
+});
+
 export const adminLogin = expressAsyncHandler(async (req, res) => {
   const { username, password, otp } = req.body;
   if (!username) {

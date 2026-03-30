@@ -30,74 +30,78 @@ export const generateAttendanceReport = async (filters) => {
     isLate,
     sortBy = 'date',
     sortOrder = 'asc',
-    limit = 20,
+    limit,
     page = 1,
     workingTimeMin,
     workingTimeMax,
   } = filters;
 
   try {
-    // Ensure 'limit' and 'page' are valid numbers
-    if (isNaN(limit) || limit <= 0 || isNaN(page) || page <= 0) {
-      throw new Error('Invalid pagination parameters.');
-    }
-    // Build the filter object based on date range
     let filter = { office };
-    // Add staffId filter
+
+    // staff filter
     if (staffId) {
       filter.staffId = staffId;
     }
 
-    // Add startDate or endDate condition
+    // date filter
     let dateFilter = {};
+
     if (startDate) dateFilter.$gte = new Date(startDate);
     if (endDate) dateFilter.$lte = new Date(endDate);
-    if (date) dateFilter = date;
-    if (Object.keys(dateFilter).length > 0) {
+
+    if (date) {
+      filter.date = new Date(date);
+    } else if (Object.keys(dateFilter).length) {
       filter.date = dateFilter;
     }
 
-    // Add working time range filter
+    // working time filter
     if (workingTimeMin || workingTimeMax) {
       filter.working_time = {};
       if (workingTimeMin) filter.working_time.$gte = Number(workingTimeMin);
       if (workingTimeMax) filter.working_time.$lte = Number(workingTimeMax);
     }
 
-    // Add status filter
+    // status filter
     if (status) {
       filter.status = status;
     }
-    // Add isLate filter
-    if (isLate) {
+
+    // late filter
+    if (isLate !== undefined) {
       filter.isLate = isLate;
     }
 
-    // Prepare sorting options
-    const sort = sortBy ? { [sortBy]: sortOrder === 'desc' ? -1 : 1 } : {};
-    // Pagination setup
-    const skip = (page - 1) * limit;
+    // sorting
+    const sort = { [sortBy]: sortOrder === 'desc' ? -1 : 1 };
 
-    // Query the database with filters, sorting, and pagination
-    const report = await Attendance.find(filter)
+    // base query
+    let query = Attendance.find(filter)
       .select('-__v -logs -office')
-      .populate('staffId', 'staffId fullName') // Populate staff name
-      .sort(sort)
-      .skip(skip)
-      .limit(Number(limit));
+      .populate('staffId', 'staffId fullName')
+      .sort(sort);
 
-    // Count the total number of records for pagination purposes
+    // apply pagination ONLY if limit provided
+    if (limit) {
+      const skip = (page - 1) * Number(limit);
+      query = query.skip(skip).limit(Number(limit));
+    }
+
+    const report = await query;
+
     const totalRecords = await Attendance.countDocuments(filter);
 
-    // Return the report along with pagination details
     return {
       report,
-      pagination: {
-        totalRecords,
-        totalPages: Math.ceil(totalRecords / limit),
-        currentPage: Number(page),
-        limit: Number(limit),
-      },
+      pagination: limit
+        ? {
+            totalRecords,
+            totalPages: Math.ceil(totalRecords / limit),
+            currentPage: Number(page),
+            limit: Number(limit),
+          }
+        : null,
     };
   } catch (error) {
     throw error;
@@ -500,46 +504,54 @@ export const generateYearlyAttendanceReport = async (filters) => {
 
 export const generateSalaryReport = async (filters) => {
   const {
-    startMonth, // 'YYYY-MM' string
-    endMonth, // 'YYYY-MM' string
-    month, // 'YYYY-MM' string (exact month)
+    startMonth,
+    endMonth,
+    month,
     office,
     staff,
-    status, // Filter by salary status (e.g., pending, finalized, paid)
+    status,
     sortBy,
-    sortOrder = 'asc', // Default sorting order
-    limit = 20, // Number of records per page
-    page = 1, // Current page number
+    sortOrder = 'asc',
+    limit,
+    page = 1,
   } = filters;
 
   try {
-    // Ensure 'limit' and 'page' are valid numbers
-    if (isNaN(limit) || limit <= 0 || isNaN(page) || page <= 0) {
-      throw new Error('Invalid pagination parameters.');
-    }
+    let filter = { office };
 
-    let filter = {};
-    filter.office = office;
-
+    // exact month filter
     if (month) {
       const [year, monthNumber] = month.split('-').map(Number);
       filter.year = year;
       filter.month = monthNumber;
-    } else if (startMonth || endMonth) {
-      // Apply range filter only if exact month is not provided
+    }
+
+    // month range filter
+    else if (startMonth || endMonth) {
       const rangeQuery = [];
+
       if (startMonth) {
         const [startYear, startMonthNumber] = startMonth.split('-').map(Number);
+
         rangeQuery.push({
-          $or: [{ year: { $gt: startYear } }, { year: startYear, month: { $gte: startMonthNumber } }],
+          $or: [
+            { year: { $gt: startYear } },
+            { year: startYear, month: { $gte: startMonthNumber } },
+          ],
         });
       }
+
       if (endMonth) {
         const [endYear, endMonthNumber] = endMonth.split('-').map(Number);
+
         rangeQuery.push({
-          $or: [{ year: { $lt: endYear } }, { year: endYear, month: { $lte: endMonthNumber } }],
+          $or: [
+            { year: { $lt: endYear } },
+            { year: endYear, month: { $lte: endMonthNumber } },
+          ],
         });
       }
+
       if (rangeQuery.length === 2) {
         filter.$and = rangeQuery;
       } else if (rangeQuery.length === 1) {
@@ -547,38 +559,46 @@ export const generateSalaryReport = async (filters) => {
       }
     }
 
-    // Filter by staff
+    // staff filter
     if (staff) filter.staff = staff;
-    // Filter by salary status
+
+    // status filter
     if (status) filter.status = status;
 
-    // Prepare sorting options. Default to sorting by year and month
+    // sorting
     const sort = sortBy
       ? { [sortBy]: sortOrder === 'desc' ? -1 : 1 }
-      : { year: sortOrder === 'desc' ? -1 : 1, month: sortOrder === 'desc' ? -1 : 1 };
-    // Pagination setup
-    const skip = (page - 1) * limit;
+      : {
+          year: sortOrder === 'desc' ? -1 : 1,
+          month: sortOrder === 'desc' ? -1 : 1,
+        };
 
-    // Query the database with filters, sorting, and pagination
-    const report = await Salary.find(filter)
+    // base query
+    let query = Salary.find(filter)
       .select('-__v -office -breakdown')
-      .populate('staff', 'staffId fullName') // Populate staff name
-      .sort(sort)
-      .skip(skip)
-      .limit(Number(limit));
+      .populate('staff', 'staffId fullName')
+      .sort(sort);
 
-    // Count the total number of records for pagination purposes
+    // apply pagination ONLY if limit provided
+    if (limit) {
+      const skip = (page - 1) * Number(limit);
+      query = query.skip(skip).limit(Number(limit));
+    }
+
+    const report = await query;
+
     const totalRecords = await Salary.countDocuments(filter);
 
-    // Return the report along with pagination details
     return {
       report,
-      pagination: {
-        totalRecords,
-        totalPages: Math.ceil(totalRecords / limit),
-        currentPage: Number(page),
-        limit: Number(limit),
-      },
+      pagination: limit
+        ? {
+            totalRecords,
+            totalPages: Math.ceil(totalRecords / limit),
+            currentPage: Number(page),
+            limit: Number(limit),
+          }
+        : null,
     };
   } catch (error) {
     throw error;
@@ -695,56 +715,59 @@ export const generateLeavesReport = async (filters) => {
     status,
     sortBy = 'dateFrom',
     sortOrder = 'asc',
-    limit = 20,
+    limit,
     page = 1,
   } = filters;
 
   try {
-    // Ensure 'limit' and 'page' are valid numbers
-    if (isNaN(limit) || limit <= 0 || isNaN(page) || page <= 0) {
-      throw new Error('Invalid pagination parameters.');
-    }
-
     let filter = {
       office,
       ...(staff && { staff }),
       ...(type && { type }),
       ...(status && { status }),
     };
+
+    // Date filtering
     let dateFilter = {};
+
     if (startDate) dateFilter.$gte = new Date(startDate);
     if (endDate) dateFilter.$lte = new Date(endDate);
-    if (date) dateFilter = new Date(date);
 
-    if (Object.keys(dateFilter).length > 0) {
+    if (date) {
+      filter.dateFrom = new Date(date);
+    } else if (Object.keys(dateFilter).length) {
       filter.dateFrom = dateFilter;
     }
 
-    // Prepare sorting options
-    const sort = sortBy ? { [sortBy]: sortOrder === 'desc' ? -1 : 1 } : {};
-    // Pagination setup
-    const skip = (page - 1) * limit;
+    // Sorting
+    const sort = { [sortBy]: sortOrder === 'desc' ? -1 : 1 };
 
-    // Query the database with filters, sorting, and pagination
-    const report = await Leave.find(filter)
+    // Base query
+    let query = Leave.find(filter)
       .select('-__v -office -document')
       .populate('staff', 'staffId fullName')
-      .sort(sort)
-      .skip(skip)
-      .limit(Number(limit));
+      .sort(sort);
 
-    // Count the total number of records for pagination purposes
+    // Apply pagination only if limit exists
+    if (limit) {
+      const skip = (page - 1) * Number(limit);
+      query = query.skip(skip).limit(Number(limit));
+    }
+
+    const report = await query;
+
     const totalRecords = await Leave.countDocuments(filter);
 
-    // Return the report along with pagination details
     return {
       report,
-      pagination: {
-        totalRecords,
-        totalPages: Math.ceil(totalRecords / limit),
-        currentPage: Number(page),
-        limit: Number(limit),
-      },
+      pagination: limit
+        ? {
+            totalRecords,
+            totalPages: Math.ceil(totalRecords / limit),
+            currentPage: Number(page),
+            limit: Number(limit),
+          }
+        : null,
     };
   } catch (error) {
     throw error;
@@ -1410,39 +1433,45 @@ export const generateEsiEcrCsv = async (office, month, year) => {
 
 export const generateHolidayFundReport = async (filters) => {
   const {
-    startMonth, // 'YYYY-MM' string
-    endMonth, // 'YYYY-MM' string
+    startMonth,
+    endMonth,
     office,
     staff,
     sortBy,
-    sortOrder = 'asc', // Default sorting order
-    limit = 20, // Number of records per page
-    page = 1, // Current page number
+    sortOrder = 'asc',
+    limit,
+    page = 1,
   } = filters;
 
   try {
-    // Ensure 'limit' and 'page' are valid numbers
-    if (isNaN(limit) || limit <= 0 || isNaN(page) || page <= 0) {
-      throw new Error('Invalid pagination parameters.');
-    }
-    let filter = {};
-    filter.office = office;
+    let filter = { office };
 
+    // Month range filter
     if (startMonth || endMonth) {
-      // Apply range filter only if exact month is not provided
       const rangeQuery = [];
+
       if (startMonth) {
         const [startYear, startMonthNumber] = startMonth.split('-').map(Number);
+
         rangeQuery.push({
-          $or: [{ year: { $gt: startYear } }, { year: startYear, month: { $gte: startMonthNumber } }],
+          $or: [
+            { year: { $gt: startYear } },
+            { year: startYear, month: { $gte: startMonthNumber } },
+          ],
         });
       }
+
       if (endMonth) {
         const [endYear, endMonthNumber] = endMonth.split('-').map(Number);
+
         rangeQuery.push({
-          $or: [{ year: { $lt: endYear } }, { year: endYear, month: { $lte: endMonthNumber } }],
+          $or: [
+            { year: { $lt: endYear } },
+            { year: endYear, month: { $lte: endMonthNumber } },
+          ],
         });
       }
+
       if (rangeQuery.length === 2) {
         filter.$and = rangeQuery;
       } else if (rangeQuery.length === 1) {
@@ -1450,35 +1479,43 @@ export const generateHolidayFundReport = async (filters) => {
       }
     }
 
-    // Filter by staff
+    // Staff filter
     if (staff) filter.staff = staff;
 
-    // Prepare sorting options. Default to sorting by year and month
+    // Sorting
     const sort = sortBy
       ? { [sortBy]: sortOrder === 'desc' ? -1 : 1 }
-      : { year: sortOrder === 'desc' ? -1 : 1, month: sortOrder === 'desc' ? -1 : 1 };
-    // Pagination setup
-    const skip = (page - 1) * limit;
+      : {
+          year: sortOrder === 'desc' ? -1 : 1,
+          month: sortOrder === 'desc' ? -1 : 1,
+        };
 
-    // Query the database with filters, sorting, and pagination
-    const report = await HolidayFund.find(filter)
+    // Base query
+    let query = HolidayFund.find(filter)
       .select('-__v -office')
-      .populate('staff', 'staffId fullName') // Populate staff name
-      .sort(sort)
-      .skip(skip)
-      .limit(Number(limit));
-    // Count the total number of records for pagination purposes
+      .populate('staff', 'staffId fullName')
+      .sort(sort);
+
+    // Apply pagination only if limit exists
+    if (limit) {
+      const skip = (page - 1) * Number(limit);
+      query = query.skip(skip).limit(Number(limit));
+    }
+
+    const report = await query;
+
     const totalRecords = await HolidayFund.countDocuments(filter);
 
-    // Return the report along with pagination details
     return {
       report,
-      pagination: {
-        totalRecords,
-        totalPages: Math.ceil(totalRecords / limit),
-        currentPage: Number(page),
-        limit: Number(limit),
-      },
+      pagination: limit
+        ? {
+            totalRecords,
+            totalPages: Math.ceil(totalRecords / limit),
+            currentPage: Number(page),
+            limit: Number(limit),
+          }
+        : null,
     };
   } catch (error) {
     throw error;
