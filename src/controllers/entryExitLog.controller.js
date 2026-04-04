@@ -3,61 +3,119 @@ import { ApiResponse, ApiError } from '../utils/responseHandler.js';
 import { EntryExitLog } from '../models/entryExitLog.model.js';
 import { Staff } from '../models/staff.model.js';
 import { autoAttendanceCalculateByStaffId } from '../services/attendance.service.js';
-import { format, subDays } from 'date-fns';
+import { parseISO, isValid, format, subDays } from 'date-fns';
 import {
   getLocalMonthBoundariesFormatted,
   getMonthBoundariesFormatted,
   getCurrentDate,
 } from '../utils/dateTime.utils.js';
+import mongoose from "mongoose";
 
+// ✅ Safe function to create a new entry log
+async function handleVeryNewEntry({ staff, entryTime, date, latestLog, deviceId, remarks }) {
+  if (!entryTime || isNaN(entryTime.getTime())) {
+    throw new Error('Invalid entryTime in handleNewEntry');
+  }
+
+  const log = new EntryExitLog({
+    staff: staff._id,
+    office: staff.office,
+    slNo: latestLog ? latestLog.slNo + 1 : 1,
+    date,
+    entryTime,
+    exitTime: null,
+    deviceId,
+    remarks,
+  });
+
+  await log.save();
+  return log;
+}
+
+// ✅ Safe function to update exit in latest log
+async function handleNewExit({ staff, exitTime, date, latestLog }) {
+  if (!exitTime || isNaN(exitTime.getTime())) {
+    throw new Error('Invalid exitTime in handleExit');
+  }
+
+  latestLog.exitTime = exitTime;
+  await latestLog.save();
+  return latestLog;
+}
+
+// ✅ Main controller to handle logs from agent
 export const newEntryExitLogsFromAgent = expressAsyncHandler(async (req, res) => {
   const { officeId, deviceSn, logs } = req.body;
+
   if (!Array.isArray(logs) || logs.length === 0) {
     throw new ApiError(400, 'No logs provided.');
   }
 
-  // Convert comma-separated string to array
-  const officeIdArray = officeId.split(',').map((id) => id.trim());
+  // ✅ Validate officeId
+  if (!officeId || !/^[0-9a-fA-F]{24}$/.test(officeId.trim())) {
+    throw new ApiError(400, 'Invalid officeId, must be 24-character hex string.');
+  }
 
+  const officeIdObj = new mongoose.Types.ObjectId(officeId.trim());
   const results = [];
+
   for (const log of logs) {
     try {
+      // ✅ Find staff
       const staff = await Staff.findOne({
-        office: { $in: officeIdArray },
-        staffId: log.deviceUserId,
+        office: officeIdObj,
+        staffId: String(log.deviceUserId),
         status: 'active',
       });
-      if (!staff) continue;
 
-      const timestamp = new Date(log.recordTime);
-      const date = format(timestamp, 'yyyy-MM-dd');
-      if (staff.dateOfJoining > timestamp) continue;
+      if (!staff) {
+        results.push({ success: false, error: 'Staff not found', log });
+        continue;
+      }
 
+      // ✅ Safe timestamp parsing
+      let timestamp = log.entryTime ? new Date(log.entryTime) :
+                      log.exitTime ? new Date(log.exitTime) :
+                      log.recordTime ? new Date(log.recordTime) : null;
+
+      if (!timestamp || isNaN(timestamp.getTime())) {
+        results.push({ success: false, error: 'Invalid time value', log });
+        continue;
+      }
+
+      // ✅ Extract date part yyyy-MM-dd
+      const date = timestamp.toISOString().split('T')[0];
+
+      // ✅ Get latest log of that staff on that date
       const latestLog = await EntryExitLog.findOne({ staff: staff._id, date }).sort({ slNo: -1 });
-      let finalLog;
 
+      // ✅ Decide Entry or Exit
+      let finalLog;
       if (!latestLog || latestLog.exitTime) {
-        finalLog = await handleNewEntry({
+        finalLog = await handleVeryNewEntry({
           staff,
-          time: timestamp,
+          entryTime: timestamp,
           date,
           latestLog,
           deviceId: deviceSn,
           remarks: log.remarks || 'Pushed from local agent',
         });
       } else {
-        finalLog = await handleExit({
+        finalLog = await handleNewExit({
           staff,
-          time: timestamp,
+          exitTime: timestamp,
           date,
           latestLog,
         });
       }
 
+      // ✅ Auto calculate attendance
       await autoAttendanceCalculateByStaffId(finalLog.office, finalLog.staff, finalLog.date);
+
       results.push({ success: true, log: finalLog });
     } catch (err) {
-      results.push({ success: false, error: err.message, log });
+      console.error('❌ Error processing log:', err);
+      results.push({ success: false, error: err.message || 'Unknown error', log });
     }
   }
 
