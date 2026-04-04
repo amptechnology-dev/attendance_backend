@@ -1,5 +1,7 @@
 import { Router } from 'express';
 import {
+  getAllOffices,
+  registerAdmin,
   adminLogin,
   adminLogout,
   resetAdminPassword,
@@ -12,6 +14,8 @@ import { adminAuth } from '../middlewares/auth.middleware.js';
 
 const router = Router();
 
+router.route('/admin/offices').get(getAllOffices);
+router.route('/admin/register').post(registerAdmin);
 router.route('/admin').post(adminLogin);
 router.route('/admin/logout').post(adminLogout);
 router.route('/admin/reset-password').post(adminAuth, resetAdminPassword);
