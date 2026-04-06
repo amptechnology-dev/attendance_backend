@@ -51,17 +51,11 @@ export const newEntryExitLogsFromAgent = expressAsyncHandler(async (req, res) =>
     throw new ApiError(400, 'No logs provided.');
   }
 
-  // ✅ Validate officeId
-  if (!officeId || !/^[0-9a-fA-F]{24}$/.test(officeId.trim())) {
-    throw new ApiError(400, 'Invalid officeId, must be 24-character hex string.');
-  }
-
   const officeIdObj = new mongoose.Types.ObjectId(officeId.trim());
   const results = [];
 
   for (const log of logs) {
     try {
-      // ✅ Find staff
       const staff = await Staff.findOne({
         office: officeIdObj,
         staffId: String(log.deviceUserId),
@@ -73,46 +67,66 @@ export const newEntryExitLogsFromAgent = expressAsyncHandler(async (req, res) =>
         continue;
       }
 
-      // ✅ Safe timestamp parsing
-      let timestamp = log.entryTime ? new Date(log.entryTime) :
-                      log.exitTime ? new Date(log.exitTime) :
-                      log.recordTime ? new Date(log.recordTime) : null;
-
-      if (!timestamp || isNaN(timestamp.getTime())) {
+      // ✅ timestamp
+      const timestamp = new Date(log.recordTime);
+      if (isNaN(timestamp.getTime())) {
         results.push({ success: false, error: 'Invalid time value', log });
         continue;
       }
 
-      // ✅ Extract date part yyyy-MM-dd
-      const date = timestamp.toISOString().split('T')[0];
+      // ✅ FIX timezone shift (IMPORTANT)
+      const localTime = new Date(timestamp.getTime() + (6 * 60 * 60 * 1000)); // BD +6
 
-      // ✅ Get latest log of that staff on that date
-      const latestLog = await EntryExitLog.findOne({ staff: staff._id, date }).sort({ slNo: -1 });
+      // ✅ date only
+      const date = new Date(
+        localTime.getFullYear(),
+        localTime.getMonth(),
+        localTime.getDate()
+      );
 
-      // ✅ Decide Entry or Exit
+      const latestLog = await EntryExitLog.findOne({
+        staff: staff._id,
+        date,
+      }).sort({ slNo: -1 });
+
       let finalLog;
-      if (!latestLog || latestLog.exitTime) {
+
+      // ✅ USE direction (MAIN FIX)
+      if (log.direction === "in") {
         finalLog = await handleVeryNewEntry({
           staff,
-          entryTime: timestamp,
+          entryTime: localTime,
           date,
           latestLog,
           deviceId: deviceSn,
           remarks: log.remarks || 'Pushed from local agent',
         });
-      } else {
+      } else if (log.direction === "out") {
+        if (!latestLog || latestLog.exitTime) {
+          // ❌ no entry exists
+          results.push({ success: false, error: 'No entry found for exit', log });
+          continue;
+        }
+
         finalLog = await handleNewExit({
           staff,
-          exitTime: timestamp,
+          exitTime: localTime,
           date,
           latestLog,
         });
+      } else {
+        results.push({ success: false, error: 'Invalid direction', log });
+        continue;
       }
 
-      // ✅ Auto calculate attendance
-      await autoAttendanceCalculateByStaffId(finalLog.office, finalLog.staff, finalLog.date);
+      await autoAttendanceCalculateByStaffId(
+        finalLog.office,
+        finalLog.staff,
+        finalLog.date
+      );
 
       results.push({ success: true, log: finalLog });
+
     } catch (err) {
       console.error('❌ Error processing log:', err);
       results.push({ success: false, error: err.message || 'Unknown error', log });
