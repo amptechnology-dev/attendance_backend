@@ -9,7 +9,7 @@ import {
   getMonthBoundariesFormatted,
   getCurrentDate,
 } from '../utils/dateTime.utils.js';
-import mongoose from "mongoose";
+import mongoose from 'mongoose';
 
 // ✅ Safe function to create a new entry log
 async function handleVeryNewEntry({ staff, entryTime, date, latestLog, deviceId, remarks }) {
@@ -67,22 +67,19 @@ export const newEntryExitLogsFromAgent = expressAsyncHandler(async (req, res) =>
         continue;
       }
 
-      // ✅ timestamp
+      // ✅ timestamp (KEEP ORIGINAL)
       const timestamp = new Date(log.recordTime);
+
       if (isNaN(timestamp.getTime())) {
         results.push({ success: false, error: 'Invalid time value', log });
         continue;
       }
 
-      // ✅ FIX timezone shift (IMPORTANT)
-      const localTime = new Date(timestamp.getTime() + (6 * 60 * 60 * 1000)); // BD +6
+      // ❌ REMOVE THIS (VERY IMPORTANT)
+      // const localTime = new Date(timestamp.getTime() + (6 * 60 * 60 * 1000));
 
-      // ✅ date only
-      const date = new Date(
-        localTime.getFullYear(),
-        localTime.getMonth(),
-        localTime.getDate()
-      );
+      // ✅ USE timestamp directly
+      const date = new Date(timestamp.getFullYear(), timestamp.getMonth(), timestamp.getDate());
 
       const latestLog = await EntryExitLog.findOne({
         staff: staff._id,
@@ -91,26 +88,24 @@ export const newEntryExitLogsFromAgent = expressAsyncHandler(async (req, res) =>
 
       let finalLog;
 
-      // ✅ USE direction (MAIN FIX)
-      if (log.direction === "in") {
+      if (log.direction === 'in') {
         finalLog = await handleVeryNewEntry({
           staff,
-          entryTime: localTime,
+          entryTime: timestamp, // ✅ FIX
           date,
           latestLog,
           deviceId: deviceSn,
           remarks: log.remarks || 'Pushed from local agent',
         });
-      } else if (log.direction === "out") {
+      } else if (log.direction === 'out') {
         if (!latestLog || latestLog.exitTime) {
-          // ❌ no entry exists
           results.push({ success: false, error: 'No entry found for exit', log });
           continue;
         }
 
         finalLog = await handleNewExit({
           staff,
-          exitTime: localTime,
+          exitTime: timestamp, // ✅ FIX
           date,
           latestLog,
         });
@@ -119,14 +114,9 @@ export const newEntryExitLogsFromAgent = expressAsyncHandler(async (req, res) =>
         continue;
       }
 
-      await autoAttendanceCalculateByStaffId(
-        finalLog.office,
-        finalLog.staff,
-        finalLog.date
-      );
+      await autoAttendanceCalculateByStaffId(finalLog.office, finalLog.staff, finalLog.date);
 
       results.push({ success: true, log: finalLog });
-
     } catch (err) {
       console.error('❌ Error processing log:', err);
       results.push({ success: false, error: err.message || 'Unknown error', log });
