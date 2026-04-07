@@ -38,7 +38,15 @@ async function handleNewExit({ staff, exitTime, date, latestLog }) {
     throw new Error('Invalid exitTime in handleExit');
   }
 
+  // ✅ Set exit time
   latestLog.exitTime = exitTime;
+
+  // ✅ Calculate working time (in minutes)
+  if (latestLog.entryTime) {
+    const workingTime = (exitTime - latestLog.entryTime) / (1000 * 60);
+    latestLog.workingTime = Math.max(0, workingTime); // নিরাপত্তার জন্য
+  }
+
   await latestLog.save();
   return latestLog;
 }
