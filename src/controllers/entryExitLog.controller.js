@@ -53,19 +53,15 @@ async function handleNewExit({ staff, exitTime, date, latestLog }) {
 
 // ✅ Main controller to handle logs from agent
 export const newEntryExitLogsFromAgent = expressAsyncHandler(async (req, res) => {
-  const { officeId, deviceSn, logs } = req.body;
+  const { logs } = req.body; 
 
   if (!Array.isArray(logs) || logs.length === 0) {
     throw new ApiError(400, 'No logs provided.');
   }
-
-  const officeIdObj = new mongoose.Types.ObjectId(officeId.trim());
   const results = [];
-
   for (const log of logs) {
     try {
       const staff = await Staff.findOne({
-        office: officeIdObj,
         staffId: String(log.deviceUserId),
         status: 'active',
       });
@@ -75,7 +71,7 @@ export const newEntryExitLogsFromAgent = expressAsyncHandler(async (req, res) =>
         continue;
       }
 
-      // ✅ timestamp (KEEP ORIGINAL)
+      // ✅ timestamp
       const timestamp = new Date(log.recordTime);
 
       if (isNaN(timestamp.getTime())) {
@@ -83,10 +79,7 @@ export const newEntryExitLogsFromAgent = expressAsyncHandler(async (req, res) =>
         continue;
       }
 
-      // ❌ REMOVE THIS (VERY IMPORTANT)
-      // const localTime = new Date(timestamp.getTime() + (6 * 60 * 60 * 1000));
-
-      // ✅ USE timestamp directly
+      // ✅ date শুধু দিন হিসেবে
       const date = new Date(timestamp.getFullYear(), timestamp.getMonth(), timestamp.getDate());
 
       const latestLog = await EntryExitLog.findOne({
@@ -94,15 +87,18 @@ export const newEntryExitLogsFromAgent = expressAsyncHandler(async (req, res) =>
         date,
       }).sort({ slNo: -1 });
 
+      // ✅ IMPORTANT: officeId + MySQL deviceId (14,15)
+      const deviceUniqueId = `${staff.office}_${log.deviceId}`;
+
       let finalLog;
 
       if (log.direction === 'in') {
         finalLog = await handleVeryNewEntry({
           staff,
-          entryTime: timestamp, // ✅ FIX
+          entryTime: timestamp,
           date,
           latestLog,
-          deviceId: deviceSn,
+          deviceId: deviceUniqueId, // ✅ FINAL DEVICE ID
           remarks: log.remarks || 'Pushed from local agent',
         });
       } else if (log.direction === 'out') {
@@ -113,7 +109,7 @@ export const newEntryExitLogsFromAgent = expressAsyncHandler(async (req, res) =>
 
         finalLog = await handleNewExit({
           staff,
-          exitTime: timestamp, // ✅ FIX
+          exitTime: timestamp,
           date,
           latestLog,
         });
@@ -122,6 +118,7 @@ export const newEntryExitLogsFromAgent = expressAsyncHandler(async (req, res) =>
         continue;
       }
 
+      // ✅ attendance হিসাব
       await autoAttendanceCalculateByStaffId(finalLog.office, finalLog.staff, finalLog.date);
 
       results.push({ success: true, log: finalLog });
