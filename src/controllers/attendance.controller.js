@@ -235,6 +235,7 @@ export const calculateAttendanceByDate = expressAsyncHandler(async (req, res) =>
   }
 
   const allStaff = await Staff.find({ office: req.admin.office }).select('_id office');
+  console.log("All Staffs...",JSON.stringify(allStaff))
   for (const staff of allStaff) {
     await autoAttendanceCalculateByStaffId(staff.office, staff._id, qDate);
   }

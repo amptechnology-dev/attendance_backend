@@ -53,12 +53,14 @@ async function handleNewExit({ staff, exitTime, date, latestLog }) {
 
 // ✅ Main controller to handle logs from agent
 export const newEntryExitLogsFromAgent = expressAsyncHandler(async (req, res) => {
-  const { logs } = req.body; 
+  const { logs } = req.body;
 
   if (!Array.isArray(logs) || logs.length === 0) {
     throw new ApiError(400, 'No logs provided.');
   }
+
   const results = [];
+
   for (const log of logs) {
     try {
       const staff = await Staff.findOne({
@@ -71,7 +73,6 @@ export const newEntryExitLogsFromAgent = expressAsyncHandler(async (req, res) =>
         continue;
       }
 
-      // ✅ timestamp
       const timestamp = new Date(log.recordTime);
 
       if (isNaN(timestamp.getTime())) {
@@ -79,7 +80,6 @@ export const newEntryExitLogsFromAgent = expressAsyncHandler(async (req, res) =>
         continue;
       }
 
-      // ✅ date শুধু দিন হিসেবে
       const date = new Date(timestamp.getFullYear(), timestamp.getMonth(), timestamp.getDate());
 
       const latestLog = await EntryExitLog.findOne({
@@ -87,38 +87,32 @@ export const newEntryExitLogsFromAgent = expressAsyncHandler(async (req, res) =>
         date,
       }).sort({ slNo: -1 });
 
-      // ✅ IMPORTANT: officeId + MySQL deviceId (14,15)
       const deviceUniqueId = `${staff.office}_${log.deviceId}`;
 
       let finalLog;
 
-      if (log.direction === 'in') {
+      // 🔥 MAIN LOGIC (ALTERNATE IN/OUT)
+
+      if (!latestLog || latestLog.exitTime) {
+        // ✅ NEW ENTRY (IN)
         finalLog = await handleVeryNewEntry({
           staff,
           entryTime: timestamp,
           date,
           latestLog,
-          deviceId: deviceUniqueId, // ✅ FINAL DEVICE ID
+          deviceId: deviceUniqueId,
           remarks: log.remarks || 'Pushed from local agent',
         });
-      } else if (log.direction === 'out') {
-        if (!latestLog || latestLog.exitTime) {
-          results.push({ success: false, error: 'No entry found for exit', log });
-          continue;
-        }
-
+      } else {
+        // ✅ EXIT (OUT)
         finalLog = await handleNewExit({
           staff,
           exitTime: timestamp,
           date,
           latestLog,
         });
-      } else {
-        results.push({ success: false, error: 'Invalid direction', log });
-        continue;
       }
 
-      // ✅ attendance হিসাব
       await autoAttendanceCalculateByStaffId(finalLog.office, finalLog.staff, finalLog.date);
 
       results.push({ success: true, log: finalLog });

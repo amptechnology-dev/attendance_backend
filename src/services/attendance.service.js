@@ -48,8 +48,16 @@ export const autoAttendanceCalculateByStaffId = async (office, staffId, date = n
     }
   }
 
-  // Fetch logs for the staff for the current date
-  const logs = await EntryExitLog.find({ staff: staffId, date: currentDate }).sort('+entryTime');
+  const startOfDay = new Date(currentDate);
+  startOfDay.setHours(0, 0, 0, 0);
+
+  const endOfDay = new Date(currentDate);
+  endOfDay.setHours(23, 59, 59, 999);
+
+  const logs = await EntryExitLog.find({
+    staff: staffId,
+    date: { $gte: startOfDay, $lte: endOfDay }, // ✅ FIX
+  }).sort({ entryTime: 1 });
 
   if (!logs || logs.length === 0) {
     // If no logs exist, mark attendance as absent
