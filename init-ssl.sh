@@ -1,7 +1,7 @@
 #!/bin/bash
 set -e
 
-DOMAIN="attendance-backend.amptechnology.in"
+DOMAIN="attendancebackend.amptechnology.in"
 EMAIL="devs.amptechnology@gmail.com"
 CERT_PATH="/root/amp_portal_backend/certbot/conf/live/$DOMAIN/fullchain.pem"
 NGINX_CONF="/root/amp_portal_backend/nginx/conf.d/attendance.conf"
