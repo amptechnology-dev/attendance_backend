@@ -1,0 +1,45 @@
+# Dependencies
+node_modules
+
+# Environment variables — never bake into image
+.env
+.env.*.local
+
+# Logs
+logs
+*.log
+npm-debug.log
+yarn-debug.log
+yarn-error.log
+
+# Build artifacts
+dist
+build
+out
+coverage
+*.tgz
+*.lcov
+
+# Cache files
+.eslintcache
+.cache
+*.tsbuildinfo
+
+# Git internals — not needed in image
+.git
+.gitignore
+
+# Editor/OS artifacts
+.idea
+.vscode
+*.swp
+*.tmp
+*.bak
+*.backup
+.DS_Store
+Thumbs.db
+
+# Runtime-mounted via docker volumes — not baked into image
+# (nginx config and certbot certs are mounted, not copied)
+nginx/
+certbot/
