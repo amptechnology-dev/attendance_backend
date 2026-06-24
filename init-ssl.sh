@@ -5,6 +5,7 @@ DOMAIN="attendancebackend.amptechnology.in"
 EMAIL="devs.amptechnology@gmail.com"
 CERT_PATH="/root/amp_portal_backend/certbot/conf/live/$DOMAIN/fullchain.pem"
 NGINX_CONF="/root/amp_portal_backend/nginx/conf.d/attendance.conf"
+SHARED_NETWORK="amp_portal_backend_app-network"
 
 echo "=== Starting deployment for $DOMAIN ==="
 
@@ -51,17 +52,16 @@ NGINXEOF
 
 echo "Temporary HTTP nginx config written."
 
-# Reload existing nginx with temp config
 docker exec nginx nginx -s reload || true
 sleep 3
 
-# Verify port 80
 echo "Verifying port 80..."
 curl -sf http://localhost:80 > /dev/null && echo "port 80 OK" || { echo "ERROR: port 80 not responding"; exit 1; }
 
 # ── Step 2: Request SSL certificate ──
 echo "Requesting certificate from Let's Encrypt..."
 docker run --rm \
+  --network "$SHARED_NETWORK" \
   -v "/root/amp_portal_backend/certbot/www:/var/www/certbot" \
   -v "/root/amp_portal_backend/certbot/conf:/etc/letsencrypt" \
   certbot/certbot certonly \
@@ -72,12 +72,10 @@ docker run --rm \
   --no-eff-email \
   -d "$DOMAIN"
 
-# Fix ownership — root user
 chown -R root:root /root/amp_portal_backend/certbot
 chmod -R 755 /root/amp_portal_backend/certbot
 sleep 2
 
-# Verify certificate was created
 if ! test -f "$CERT_PATH"; then
   echo "ERROR: Certificate not found at $CERT_PATH after certbot run!"
   ls -la /root/amp_portal_backend/certbot/conf/live/ 2>/dev/null || echo "live/ folder does not exist"
@@ -134,7 +132,10 @@ docker compose up -d --build --remove-orphans
 
 sleep 8
 
-# ── Step 5: Reload existing nginx with HTTPS config ──
+# ── Step 5: Verify app then reload nginx ──
+echo "Verifying attendance-app is up..."
+docker inspect attendance-app | grep -A3 "Status" | head -5
+
 docker exec nginx nginx -s reload || true
 
 echo ""

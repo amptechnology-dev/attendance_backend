@@ -1,17 +1,11 @@
 services:
   app:
-    build: .
     container_name: attendance-app
-    restart: unless-stopped
-    env_file:
-      - .env
-    expose:
-      - '8001'
-    command: sh -c "node src/index.js"
+    build: .
     networks:
-      - shared-network
+      - shared-nginx-net
 
 networks:
-  shared-network:
+  shared-nginx-net:
     external: true
     name: amp_portal_backend_app-network
