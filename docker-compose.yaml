@@ -2,6 +2,8 @@ services:
   app:
     container_name: attendance-app
     build: .
+    env_file:
+      - .env
     networks:
       - shared-nginx-net
 

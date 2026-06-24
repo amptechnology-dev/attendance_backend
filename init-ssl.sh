@@ -9,6 +9,22 @@ SHARED_NETWORK="amp_portal_backend_app-network"
 
 echo "=== Starting deployment for $DOMAIN ==="
 
+# ── Helper: wait until attendance-app is on the shared network ──
+wait_for_network() {
+  echo "Waiting for attendance-app to join $SHARED_NETWORK..."
+  for i in $(seq 1 20); do
+    if docker network inspect "$SHARED_NETWORK" 2>/dev/null | grep -q "attendance-app"; then
+      echo "attendance-app is on the network!"
+      return 0
+    fi
+    echo "  attempt $i/20 — not yet, waiting 2s..."
+    sleep 2
+  done
+  echo "ERROR: attendance-app never joined $SHARED_NETWORK!"
+  docker network inspect "$SHARED_NETWORK" | grep -A5 "Containers"
+  exit 1
+}
+
 # ─────────────────────────────────────────────────────────────
 # CASE 1: Certificate already exists → just redeploy
 # ─────────────────────────────────────────────────────────────
@@ -19,8 +35,9 @@ if test -f "$CERT_PATH"; then
   docker compose down || true
   docker compose up -d --build --remove-orphans
 
-  sleep 5
-  docker exec nginx nginx -s reload || true
+  wait_for_network
+
+  docker exec nginx nginx -s reload
 
   echo ""
   echo "=== Redeploy complete! ==="
@@ -130,13 +147,10 @@ echo "Starting attendance app..."
 docker compose down || true
 docker compose up -d --build --remove-orphans
 
-sleep 8
+wait_for_network
 
-# ── Step 5: Verify app then reload nginx ──
-echo "Verifying attendance-app is up..."
-docker inspect attendance-app | grep -A3 "Status" | head -5
-
-docker exec nginx nginx -s reload || true
+# ── Step 5: Reload nginx after confirming network ──
+docker exec nginx nginx -s reload
 
 echo ""
 echo "=== SSL setup complete! ==="
