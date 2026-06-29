@@ -6,6 +6,7 @@ services:
       - .env
     networks:
       - shared-nginx-net
+    restart: unless-stopped # ← ADD THIS
 
 networks:
   shared-nginx-net:
