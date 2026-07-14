@@ -7,8 +7,9 @@ import { Holiday } from '../models/holiday.model.js';
 import { WeekOff } from '../models/weekOff.model.js';
 import { Leave } from '../models/leave.model.js';
 import logger from '../config/logger.js';
-import { getLocalMonthBoundariesFormatted } from '../utils/dateTime.utils.js';
+import { getLocalMonthBoundariesFormatted, getCurrentDate } from '../utils/dateTime.utils.js';
 import { OffDayWork } from '../models/offDayWork.model.js';
+import { startOfMonth, endOfMonth, format } from 'date-fns';
 
 export const autoAttendanceCalculateByStaffId = async (office, staffId, date = new Date()) => {
   const currentDate = formatDate(date, 'yyyy-MM-dd');
@@ -350,4 +351,82 @@ const canAllowLateEntry = async (staffId, entryTime, firstHalfStart, maxLateDays
   if (lateDaysCount >= maxLateDays) return false;
 
   return true; //  If all checks pass, allow late entry
+};
+
+export const getMissingAttendanceDates = async (office, month, year) => {
+  const now = new Date();
+
+  const selectedMonth = month ? Number(month) - 1 : now.getMonth();
+  const selectedYear = year ? Number(year) : now.getFullYear();
+
+  const requestedDate = new Date(selectedYear, selectedMonth, 1);
+  const currentMonthDate = new Date(now.getFullYear(), now.getMonth(), 1);
+
+  if (requestedDate > currentMonthDate) {
+    return [];
+  }
+
+  const startDate = startOfMonth(requestedDate);
+  let endDate = endOfMonth(requestedDate);
+
+  if (selectedMonth === now.getMonth() && selectedYear === now.getFullYear()) {
+    endDate = new Date(now);
+    endDate.setDate(endDate.getDate() - 1);
+    endDate.setHours(23, 59, 59, 999);
+  }
+
+  // যাদের EntryExitLog আছে (entry বা exit যেকোনো একটা), মানে সেদিন কাজ করেছে
+  const logs = await EntryExitLog.find({
+    office,
+    date: { $gte: startDate, $lte: endDate },
+    $or: [{ entryTime: { $ne: null } }, { exitTime: { $ne: null } }],
+  })
+    .select('staff date')
+    .populate('staff', 'fullName staffId'); // নাম দেখার জন্য populate
+
+  // যাদের Attendance already calculate হয়ে গেছে
+  const attendances = await Attendance.find({
+    office,
+    date: { $gte: startDate, $lte: endDate },
+  }).select('staffId date');
+
+  const attendanceSet = new Set(
+    attendances.map((a) => `${a.staffId.toString()}-${format(new Date(a.date), 'yyyy-MM-dd')}`)
+  );
+
+  // date -> Map(staffId -> {fullName, staffId})
+  const missingByDate = new Map();
+
+  for (const log of logs) {
+    if (!log.staff) continue; // staff deleted/reference broken হলে skip
+
+    const dayString = format(new Date(log.date), 'yyyy-MM-dd');
+    const staffIdStr = log.staff._id.toString();
+    const key = `${staffIdStr}-${dayString}`;
+
+    if (attendanceSet.has(key)) continue; // already calculated, skip
+
+    if (!missingByDate.has(dayString)) {
+      missingByDate.set(dayString, new Map());
+    }
+    missingByDate.get(dayString).set(staffIdStr, {
+      _id: staffIdStr,
+      fullName: log.staff.fullName,
+      staffId: log.staff.staffId,
+    });
+  }
+
+  const response = [];
+  for (const [date, staffMap] of missingByDate.entries()) {
+    const employees = Array.from(staffMap.values());
+    response.push({
+      date,
+      employeeCount: employees.length,
+      employees, // 👈 debug এর জন্য এখন নাম সহ দেখতে পারবে
+    });
+  }
+
+  response.sort((a, b) => new Date(a.date) - new Date(b.date));
+
+  return response;
 };

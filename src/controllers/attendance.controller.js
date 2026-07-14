@@ -3,7 +3,7 @@ import { ApiResponse, ApiError } from '../utils/responseHandler.js';
 import { Attendance } from '../models/attendance.model.js';
 import { Leave } from '../models/leave.model.js';
 import { Staff } from '../models/staff.model.js';
-import { autoAttendanceCalculateByStaffId } from '../services/attendance.service.js';
+import { autoAttendanceCalculateByStaffId, getMissingAttendanceDates } from '../services/attendance.service.js';
 import { parseISO, isValid, subDays, formatDate } from 'date-fns';
 import { permissions } from '../config/constants.js';
 import {
@@ -235,12 +235,32 @@ export const calculateAttendanceByDate = expressAsyncHandler(async (req, res) =>
   }
 
   const allStaff = await Staff.find({ office: req.admin.office }).select('_id office');
-  console.log("All Staffs...",JSON.stringify(allStaff))
+
+  const failedStaff = [];
+
   for (const staff of allStaff) {
-    await autoAttendanceCalculateByStaffId(staff.office, staff._id, qDate);
+    try {
+      await autoAttendanceCalculateByStaffId(staff.office, staff._id, qDate);
+    } catch (error) {
+      console.error(`[Attendance][calculate-by-date] Failed for staffId=${staff._id}, date=${date}:`, error.message);
+      failedStaff.push({ staffId: staff._id, error: error.message });
+    }
   }
 
-  return new ApiResponse(200, null, 'Attendance calculated successfully.').send(res);
+  if (failedStaff.length > 0) {
+    console.warn(
+      `[Attendance][calculate-by-date] ${failedStaff.length}/${allStaff.length} staff failed on ${date}:`,
+      failedStaff
+    );
+  }
+
+  return new ApiResponse(
+    200,
+    { total: allStaff.length, failed: failedStaff.length, failedStaff },
+    failedStaff.length > 0
+      ? `Attendance calculated with ${failedStaff.length} failure(s). Check server logs.`
+      : 'Attendance calculated successfully.'
+  ).send(res);
 });
 
 export const assignOffDayWork = expressAsyncHandler(async (req, res) => {
@@ -303,4 +323,10 @@ export const assignOffDayWork = expressAsyncHandler(async (req, res) => {
 export const getAllOffDayWorkAssigned = expressAsyncHandler(async (req, res) => {
   const offDayAssigments = await OffDayWork.find({ office: req.admin.office }).populate('staff', 'fullName staffId');
   return new ApiResponse(200, offDayAssigments, 'All off-day work assigned fetched successfully').send(res);
+});
+
+export const getMissingAttendanceReport = expressAsyncHandler(async (req, res) => {
+  const { month, year } = req.query;
+  const data = await getMissingAttendanceDates(req.admin.office, month, year);
+  return new ApiResponse(200, data, 'Missing attendance report fetched successfully').send(res);
 });

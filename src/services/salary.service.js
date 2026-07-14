@@ -54,9 +54,24 @@ const autoCalculateAllSalaryByMonth = async (officeId, month, year) => {
     //Main Calculation
     const results = await Promise.all(
       staffList.map(async (staff) => {
+        if (!staff.monthlySalary || staff.monthlySalary <= 0) {
+          logger.info(
+            `Skipping salary calculation for ${staff.fullName} (${staff._id}) - Monthly salary not configured.`
+          );
+
+          return {
+            staffId: staff._id,
+            staffName: staff.fullName,
+            message: 'Monthly salary not configured. Salary calculation skipped.',
+          };
+        }
+        const overtimeRate = staff.overtimeRate || 0;
         const attendanceData = await Attendance.find({
           staffId: staff._id,
-          date: { $gte: monthStartDate, $lte: monthEndDate },
+          date: {
+            $gte: monthStartDate,
+            $lte: monthEndDate,
+          },
         });
 
         let totalFullDays = 0,
@@ -120,7 +135,7 @@ const autoCalculateAllSalaryByMonth = async (officeId, month, year) => {
 
         // Base salary is full month salary
         const baseSalary = staff.monthlySalary;
-        const overtimePay = overtimeHours * staff.overtimeRate;
+        const overtimePay = overtimeHours * overtimeRate;
         const bonus = 0; // TODO: calculate bonus
         const grossSalary = Math.round(baseSalary - totalHourlyDays * dailyRate + hourlyPay + overtimePay + bonus);
 
