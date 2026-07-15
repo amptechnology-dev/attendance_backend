@@ -323,22 +323,80 @@ export const manualExitLog = expressAsyncHandler(async (req, res) => {
 });
 
 export const getEntryExitLogs = expressAsyncHandler(async (req, res) => {
-  const { startDate, endDate, days } = req.query;
-  const filters = { office: req.admin.office };
+  const { date, startDate, endDate, days, search } = req.query;
 
-  if (startDate) {
-    filters.date = { ...(filters.date || {}), $gte: new Date(startDate) };
+  const filters = {
+    office: req.admin.office,
+  };
+
+  // Single Date Filter
+  if (date) {
+    const start = new Date(date);
+    start.setHours(0, 0, 0, 0);
+
+    const end = new Date(date);
+    end.setHours(23, 59, 59, 999);
+
+    filters.date = {
+      $gte: start,
+      $lte: end,
+    };
   }
-  if (endDate) {
-    filters.date = { ...(filters.date || {}), $lte: new Date(endDate) };
+
+  // Date Range Filter
+  else {
+    if (startDate) {
+      filters.date = {
+        ...(filters.date || {}),
+        $gte: new Date(startDate),
+      };
+    }
+
+    if (endDate) {
+      const end = new Date(endDate);
+      end.setHours(23, 59, 59, 999);
+
+      filters.date = {
+        ...(filters.date || {}),
+        $lte: end,
+      };
+    }
   }
+
+  // Last X Days
   if (days) {
     const currentDate = getCurrentDate();
-    filters.date = { ...(filters.date || {}), $gte: subDays(new Date(currentDate), parseInt(days)) };
+
+    filters.date = {
+      ...(filters.date || {}),
+      $gte: subDays(new Date(currentDate), Number(days)),
+    };
   }
 
-  const entryExitLogs = await EntryExitLog.find(filters).populate('staff', 'fullName staffId').sort('-date -entryTime');
-  return new ApiResponse(200, entryExitLogs, 'Entry exit logs fetched successfully.').send(res);
+  // Staff Name Search
+  if (search) {
+    const staffs = await Staff.find({
+      office: req.admin.office,
+      fullName: {
+        $regex: search,
+        $options: 'i',
+      },
+    }).select('_id');
+
+    filters.staff = {
+      $in: staffs.map((s) => s._id),
+    };
+  }
+
+  const entryExitLogs = await EntryExitLog.find(filters)
+    .populate('staff', 'fullName staffId')
+    .sort({ date: -1, entryTime: -1 });
+
+  return new ApiResponse(
+    200,
+    entryExitLogs,
+    'Entry exit logs fetched successfully.'
+  ).send(res);
 });
 
 export const getEntryExitLogsByMonth = expressAsyncHandler(async (req, res) => {
