@@ -49,15 +49,12 @@ export const autoAttendanceCalculateByStaffId = async (office, staffId, date = n
     }
   }
 
-  const startOfDay = new Date(currentDate);
-  startOfDay.setHours(0, 0, 0, 0);
-
-  const endOfDay = new Date(currentDate);
-  endOfDay.setHours(23, 59, 59, 999);
+  const startOfDay = new Date(`${currentDate}T00:00:00.000+05:30`);
+const endOfDay = new Date(`${currentDate}T23:59:59.999+05:30`);
 
   const logs = await EntryExitLog.find({
     staff: staffId,
-    date: { $gte: startOfDay, $lte: endOfDay }, // ✅ FIX
+    date: { $gte: startOfDay, $lte: endOfDay }, 
   }).sort({ entryTime: 1 });
 
   if (!logs || logs.length === 0) {
