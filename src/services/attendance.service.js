@@ -11,19 +11,26 @@ import { getLocalMonthBoundariesFormatted, getCurrentDate } from '../utils/dateT
 import { OffDayWork } from '../models/offDayWork.model.js';
 import { startOfMonth, endOfMonth, format } from 'date-fns';
 
+const toMinutePrecision = (date) => {
+  const d = new Date(date);
+  d.setSeconds(0, 0);
+  return d;
+};
+
 export const autoAttendanceCalculateByStaffId = async (office, staffId, date = new Date()) => {
   const currentDate = formatDate(date, 'yyyy-MM-dd');
-  // Check if the date is a holiday or week-off
+
   const staff = await Staff.findOne({ _id: staffId, status: 'active', dateOfJoining: { $lte: currentDate } });
   if (!staff) return;
 
+  // ---------- Step 1: আজ কি Holiday / Week-off ----------
   const holiday = await Holiday.findOne({
     date: currentDate,
     office,
     $or: [{ forAllDepartments: true }, { department: staff.department }],
   });
+
   let weekOff = null;
-  let isOffDayWorkAssigned = null;
   if (!holiday) {
     weekOff = await WeekOff.findOne({
       date: currentDate,
@@ -31,35 +38,32 @@ export const autoAttendanceCalculateByStaffId = async (office, staffId, date = n
       $or: [{ forAllDepartments: true }, { department: staff.department }],
     });
   }
+  const isOffDay = Boolean(holiday || weekOff);
+  const offDayType = holiday ? 'holiday' : 'week-off';
 
-  if (holiday || weekOff) {
-    const offDayType = holiday ? 'holiday' : 'week-off';
-    isOffDayWorkAssigned = await OffDayWork.findOne({
-      staff: staffId,
-      date: currentDate,
-    });
-
-    if (!isOffDayWorkAssigned) {
-      await Attendance.findOneAndUpdate(
-        { staffId, date: currentDate },
-        { office, status: offDayType, isOffDayWork: false },
-        { upsert: true }
-      );
-      return;
-    }
-  }
-
+  // ---------- Step 2: EntryExitLog আগে fetch করো ----------
+  // FIX (Scenario 7/8): status নির্ধারণ হবে আসল log এর presence দিয়ে,
+  // OffDayWork assignment দিয়ে না। Assignment শুধু benefit/validation-এর জন্য ব্যবহার হবে।
   const startOfDay = new Date(`${currentDate}T00:00:00.000+05:30`);
-const endOfDay = new Date(`${currentDate}T23:59:59.999+05:30`);
+  const endOfDay = new Date(`${currentDate}T23:59:59.999+05:30`);
 
   const logs = await EntryExitLog.find({
     staff: staffId,
-    date: { $gte: startOfDay, $lte: endOfDay }, 
+    date: { $gte: startOfDay, $lte: endOfDay },
   }).sort({ entryTime: 1 });
 
-  if (!logs || logs.length === 0) {
-    // If no logs exist, mark attendance as absent
-    // Check leave application
+  // ---------- Step 3: Off-day (Holiday/Week-off) কিন্তু কোনো log নেই ----------
+  if (isOffDay && (!logs || logs.length === 0)) {
+    await Attendance.findOneAndUpdate(
+      { staffId, date: currentDate },
+      { office, status: offDayType, isOffDayWork: false, firstHalf: 'absent', secondHalf: 'absent' },
+      { upsert: true, new: true }
+    );
+    return;
+  }
+
+  // ---------- Step 4: সাধারণ working day কিন্তু কোনো log নেই => Absent ----------
+  if (!isOffDay && (!logs || logs.length === 0)) {
     const leaveAccepted = await Leave.findOne({
       staff: staffId,
       dateFrom: { $lte: currentDate },
@@ -76,43 +80,36 @@ const endOfDay = new Date(`${currentDate}T23:59:59.999+05:30`);
     return;
   }
 
+  // এখান থেকে logs.length > 0 নিশ্চিত (staff কাজ করেছে — normal day অথবা off-day work)
+  const isOffDayWorkAssigned = isOffDay ? await OffDayWork.findOne({ staff: staffId, date: currentDate }) : null;
+
   const dutyTiming = await DutyTiming.findOne({ office, department: staff.department });
   if (!dutyTiming) return;
+
   const firstHalfStart = new Date(`${currentDate}T${dutyTiming.startTime}+05:30`);
   const firstHalfEnd = new Date(`${currentDate}T${dutyTiming.firstHalfEnd}+05:30`);
   const secondHalfStart = new Date(`${currentDate}T${dutyTiming.secondHalfStart}+05:30`);
   const dayEnd = new Date(`${currentDate}T${dutyTiming.endTime}+05:30`);
 
-  // Check if late entry
+  // ---------- Late entry check (শুধু normal working day-তে প্রযোজ্য) ----------
   let isLate = false;
-  if (logs[0].entryTime > firstHalfStart) {
-    isLate = true;
-  }
-  // Check if late entry is allowed
   let allowedLate = false;
-  if (isLate) {
-    allowedLate = await canAllowLateEntry(
-      staffId,
-      logs[0].entryTime,
-      firstHalfStart,
-      dutyTiming?.lateAllowed,
-      dutyTiming?.lateEntryTime
-    );
+  if (!isOffDay) {
+    isLate = toMinutePrecision(logs[0].entryTime) > toMinutePrecision(firstHalfStart);
+    if (isLate) {
+      allowedLate = await canAllowLateEntry(
+        staffId,
+        logs[0].entryTime,
+        firstHalfStart,
+        currentDate, // FIX: quota এখন শুধু আজকের আগের দিন গুলো থেকে count হবে
+        dutyTiming?.lateAllowed,
+        dutyTiming?.lateEntryTime
+      );
+    }
   }
 
+  // ---------- শুধু Entry হয়েছে, এখনো Exit হয়নি (interim state) ----------
   if (logs.length === 1 && !logs[0].exitTime) {
-    // Check if the staff has missed off days
-    // const lastAttendance = await Attendance.findOne({
-    //   staffId,
-    //   date: { $lt: currentDate },
-    //   status: { $nin: ['absent', 'week-off', 'holiday'] },
-    // }).sort('-date');
-
-    // if (lastAttendance && differenceInCalendarDays(new Date(currentDate), lastAttendance.date) > 1) {
-    //   await markMissedOffDaysAsLeave(staffId, office, staff.department, lastAttendance.date, new Date(currentDate));
-    // }
-
-    // If only one log exists and it is an entry log, mark attendance as present
     await Attendance.findOneAndUpdate(
       { staffId, date: currentDate },
       {
@@ -129,60 +126,65 @@ const endOfDay = new Date(`${currentDate}T23:59:59.999+05:30`);
     return;
   }
 
-  // Calculate total work time and breaks
+  // ---------- Total work time & break time ----------
   let totalWorkTime = 0;
   let breakTime = 0;
-
   for (let i = 0; i < logs.length; i++) {
     const log = logs[i];
     if (log.exitTime) {
-      totalWorkTime += (new Date(log.exitTime) - new Date(log.entryTime)) / (1000 * 60); // Convert to minutes
+      totalWorkTime += (new Date(log.exitTime) - new Date(log.entryTime)) / (1000 * 60);
     }
-
     if (i < logs.length - 1) {
       const nextLog = logs[i + 1];
       breakTime += (new Date(nextLog.entryTime) - new Date(log.exitTime)) / (1000 * 60);
     }
   }
 
-  // Check if first and second halves are covered
-  const firstHalfWorked = logs.some(
-    (log) => (log.entryTime <= firstHalfStart || allowedLate) && log.exitTime >= firstHalfEnd
-  );
-  const secondHalfWorked = logs.some((log) => log.entryTime <= secondHalfStart && log.exitTime >= dayEnd);
+  let firstHalf, secondHalf, status;
 
-  // Calculate attendance status
-  const firstHalf = firstHalfWorked ? 'present' : 'absent';
-  const secondHalf = secondHalfWorked ? 'present' : 'absent';
+  if (isOffDay) {
+    // Scenario 7: Holiday/Week-off এ কাজ করলে => সবসময় Present
+    firstHalf = 'present';
+    secondHalf = 'present';
+    status = 'present';
+  } else {
+    // ---------- Normal working day — Scenario 1-6 ----------
+    const firstHalfWorked = logs.some(
+      (log) =>
+        (toMinutePrecision(log.entryTime) <= toMinutePrecision(firstHalfStart) || allowedLate) &&
+        log.exitTime &&
+        toMinutePrecision(log.exitTime) >= toMinutePrecision(firstHalfEnd)
+    );
+    const secondHalfWorked = logs.some(
+      (log) =>
+        toMinutePrecision(log.entryTime) <= toMinutePrecision(secondHalfStart) &&
+        log.exitTime &&
+        toMinutePrecision(log.exitTime) >= toMinutePrecision(dayEnd)
+    );
 
-  const status =
-    firstHalf === 'present' && secondHalf === 'present'
-      ? 'full-day'
-      : firstHalf === 'present' || secondHalf === 'present'
-        ? 'half-day'
-        : 'present';
+    firstHalf = firstHalfWorked ? 'present' : 'absent';
+    secondHalf = secondHalfWorked ? 'present' : 'absent';
 
-  // Handle off-day work validation if assigned
+    status =
+      firstHalf === 'present' && secondHalf === 'present'
+        ? 'full-day'
+        : firstHalf === 'present' || secondHalf === 'present'
+          ? 'half-day'
+          : 'present'; // Scenario 3 & 5 => neither half covered => "present"
+  }
+
+  // ---------- Off-day work benefit validity (assignment থাকলে) ----------
   let isOffDayValid = false;
   if (isOffDayWorkAssigned) {
     const { workType: requiredWorkType } = isOffDayWorkAssigned;
-
+    const fullDayMinutes = (dayEnd - firstHalfStart) / (1000 * 60) - breakTime;
     if (requiredWorkType === 'hourly') {
-      // For hourly work type, always consider it valid as pay is based on hours worked
       isOffDayValid = true;
     } else if (requiredWorkType === 'full-day') {
-      isOffDayValid = status === 'full-day';
+      isOffDayValid = totalWorkTime >= fullDayMinutes * 0.9; // ~পুরো দিনের কাছাকাছি কাজ
     } else if (requiredWorkType === 'half-day') {
-      isOffDayValid = status === 'half-day' || status === 'full-day';
+      isOffDayValid = totalWorkTime >= fullDayMinutes * 0.4; // অন্তত অর্ধেক দিনের কাছাকাছি
     }
-
-    // Update the offDayWork document with validation status
-    // await OffDayWork.findByIdAndUpdate(isOffDayWorkAssigned._id, {
-    //   $set: {
-    //     isWorked: isOffDayValid,
-    //     actualWorkType: status,
-    //   },
-    // });
   }
 
   const attendance = await Attendance.findOneAndUpdate(
@@ -205,7 +207,8 @@ const endOfDay = new Date(`${currentDate}T23:59:59.999+05:30`);
     },
     { upsert: true, new: true }
   );
-  // Check if the staff has missed off days
+
+  // ---------- Missed off-day leave check (অপরিবর্তিত) ----------
   const lastAttendance = await Attendance.findOne({
     staffId,
     date: { $lt: currentDate },
@@ -220,30 +223,19 @@ const endOfDay = new Date(`${currentDate}T23:59:59.999+05:30`);
 
 /**
  * Marks off days (holidays and week-offs) between the last attendance and the current day as special leave.
- *
- * @param {ObjectId} staffId - The staff ID.
- * @param {ObjectId} office - The office ID.
- *  @param {ObjectId} department - The department ID. Needed for filtering
- * @param {Date} lastAttendanceDate - The last recorded attendance date.
- * @param {Date} currentDate - The current day when the staff clocks in.
  */
 const markMissedOffDaysAsLeave = async (staffId, office, department, lastAttendanceDate, currentDate) => {
-  // Calculate the gap: from the day after lastAttendanceDate to the day before currentDate.
   const gapStart = addDays(lastAttendanceDate, 1);
   const gapEnd = subDays(currentDate, 1);
-  // Early abort if there is no gap.
   if (gapStart > gapEnd) return;
 
-  // Check Attendance records for each day in the gap is processed.
   const middleDates = eachDayOfInterval({ start: gapStart, end: gapEnd });
   const processedCount = await Attendance.countDocuments({
     staffId,
     date: { $in: middleDates.map((d) => formatDate(d, 'yyyy-MM-dd')) },
   });
-  // Early abort if all days are not processed.
   if (processedCount < middleDates.length) return;
 
-  // Fetch all off days (holidays and week-offs) within the gap.
   const [holidays, weekOffs] = await Promise.all([
     Holiday.find({
       date: { $gte: gapStart, $lte: gapEnd },
@@ -256,55 +248,41 @@ const markMissedOffDaysAsLeave = async (staffId, office, department, lastAttenda
       $or: [{ forAllDepartments: true }, { department }],
     }),
   ]);
-  // Combine and sort by date.
   const offDays = [...holidays, ...weekOffs];
-  if (offDays.length === 0) return; // Abort if no off days found.
+  if (offDays.length === 0) return;
 
   offDays.sort((a, b) => a.date - b.date);
   const offDates = offDays.map((d) => d.date);
 
-  // Determine expected adjacent working days:
-  // Expected previous working day: one day before the first off day.
   const expectedPrev = subDays(offDates[0], 1);
-  // Expected next working day: one day after the last off day.
   const expectedNext = addDays(offDates[offDates.length - 1], 1);
-  // Check if adjacent days are present.
   const isPrevPresent = isSameDay(lastAttendanceDate, expectedPrev);
   const isNextPresent = isSameDay(currentDate, expectedNext);
-  // Early abort if both adjacent days are present (i.e. no deduction needed).
   if (isPrevPresent && isNextPresent) return;
 
-  // Determine the leave range: from the first off day to the last off day.
   const dateFrom = offDates[0];
   const dateTo = offDates[offDates.length - 1];
 
-  // If both previous and next days are absent, all off days should be deducted.
-  // Otherwise, only one day should be deducted.
   const leaveCount = !isPrevPresent && !isNextPresent ? offDates.length : 1;
 
-  // Adjust the range based on the leave count:
   const finalDateFrom = leaveCount === 1 ? (isPrevPresent ? dateTo : dateFrom) : dateFrom;
   const finalDateTo = leaveCount === 1 ? (isNextPresent ? dateFrom : dateTo) : dateTo;
 
-  // Check if leave already exists for this date range.
   const existingLeaves = await Leave.find({
     staff: staffId,
     office,
-    dateFrom: { $lte: dateTo }, // Ensure it spans the date range
+    dateFrom: { $lte: dateTo },
     dateTo: { $gte: dateFrom },
-    type: 'holidayLeave', // Ensure the leave type is matched
+    type: 'holidayLeave',
   });
-  // If leave already exists, abort.
   if (existingLeaves.length > 0) return;
 
-  // Construct remarks for the leave
   const reason =
     leaveCount === 1
       ? `Absent on ${formatDate(isPrevPresent ? expectedNext : expectedPrev, 'dd-MM-yyyy')}`
       : `Absent for ${formatDate(expectedPrev, 'dd-MM-yyyy')} to ${formatDate(expectedNext, 'dd-MM-yyyy')}`;
 
   try {
-    // Insert the leave record into the database.
     await Leave.create({
       staff: staffId,
       office,
@@ -320,34 +298,33 @@ const markMissedOffDaysAsLeave = async (staffId, office, department, lastAttenda
   }
 };
 
-/**
- *  Checks if late entry is allowed for a staff based on their attendance record and late allowance.
- *
- * @param {ObjectId} staffId - The staff ID.
- * @param {Date} entryTime - The entry time.
- * @param {Date} firstHalfStart - The default start time/entry time.
- * @param {number} [maxLateDays=4] - The maximum number of late days allowed.
- * @param {number} [lateAllowance=60] - The maximum late allowance in minutes.
- * @returns {Promise<boolean>} Returns `true` if late entry is allowed, `false` otherwise.
- */
-const canAllowLateEntry = async (staffId, entryTime, firstHalfStart, maxLateDays = 4, lateAllowance = 60) => {
-  const lateAllowanceMs = lateAllowance * 60 * 1000;
-  // Check if entry time is  actually late
-  if (entryTime <= firstHalfStart) return true;
-  // Check if late entry is within allowed grace period
-  if (entryTime > new Date(firstHalfStart.getTime() + lateAllowanceMs)) return false;
 
-  const { startDate, endDate } = getLocalMonthBoundariesFormatted(entryTime);
-  // Count how many times the staff has already used late allowance
+const canAllowLateEntry = async (
+  staffId,
+  entryTime,
+  firstHalfStart,
+  currentDate,
+  maxLateDays = 4,
+  lateAllowance = 60
+) => {
+  const lateAllowanceMs = lateAllowance * 60 * 1000;
+  const entry = toMinutePrecision(entryTime);
+  const start = toMinutePrecision(firstHalfStart);
+  // আসলেই late কিনা
+  if (entry <= start) return true;
+  // Grace period (e.g. 60 min) এর বাইরে হলে সরাসরি না (কোনো quota তেই allow না)
+  if (entry > toMinutePrecision(new Date(start.getTime() + lateAllowanceMs))) return false;
+
+  const { startDate } = getLocalMonthBoundariesFormatted(entryTime);
+  // FIX: শুধু আজকের আগের দিনগুলো count হবে, পুরো মাস না
   const lateDaysCount = await Attendance.countDocuments({
     staffId,
-    allowedLate: true, // Only count days where late was allowed
-    date: { $gte: startDate, $lte: endDate },
+    allowedLate: true,
+    date: { $gte: startDate, $lt: currentDate },
   });
-  // Check if the staff has already exhausted their late allowance
   if (lateDaysCount >= maxLateDays) return false;
 
-  return true; //  If all checks pass, allow late entry
+  return true;
 };
 
 export const getMissingAttendanceDates = async (office, month, year) => {
@@ -372,16 +349,14 @@ export const getMissingAttendanceDates = async (office, month, year) => {
     endDate.setHours(23, 59, 59, 999);
   }
 
-  // যাদের EntryExitLog আছে (entry বা exit যেকোনো একটা), মানে সেদিন কাজ করেছে
   const logs = await EntryExitLog.find({
     office,
     date: { $gte: startDate, $lte: endDate },
     $or: [{ entryTime: { $ne: null } }, { exitTime: { $ne: null } }],
   })
     .select('staff date')
-    .populate('staff', 'fullName staffId'); // নাম দেখার জন্য populate
+    .populate('staff', 'fullName staffId');
 
-  // যাদের Attendance already calculate হয়ে গেছে
   const attendances = await Attendance.find({
     office,
     date: { $gte: startDate, $lte: endDate },
@@ -391,17 +366,16 @@ export const getMissingAttendanceDates = async (office, month, year) => {
     attendances.map((a) => `${a.staffId.toString()}-${format(new Date(a.date), 'yyyy-MM-dd')}`)
   );
 
-  // date -> Map(staffId -> {fullName, staffId})
   const missingByDate = new Map();
 
   for (const log of logs) {
-    if (!log.staff) continue; // staff deleted/reference broken হলে skip
+    if (!log.staff) continue;
 
     const dayString = format(new Date(log.date), 'yyyy-MM-dd');
     const staffIdStr = log.staff._id.toString();
     const key = `${staffIdStr}-${dayString}`;
 
-    if (attendanceSet.has(key)) continue; // already calculated, skip
+    if (attendanceSet.has(key)) continue;
 
     if (!missingByDate.has(dayString)) {
       missingByDate.set(dayString, new Map());
@@ -419,7 +393,7 @@ export const getMissingAttendanceDates = async (office, month, year) => {
     response.push({
       date,
       employeeCount: employees.length,
-      employees, // 👈 debug এর জন্য এখন নাম সহ দেখতে পারবে
+      employees,
     });
   }
 

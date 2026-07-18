@@ -14,6 +14,7 @@ import {
 import { Holiday } from '../models/holiday.model.js';
 import { WeekOff } from '../models/weekOff.model.js';
 import { OffDayWork } from '../models/offDayWork.model.js';
+import { AttendanceCalculation } from '../models/attendanceCalculation.model.js';
 
 export const getAttendanceLogs = expressAsyncHandler(async (req, res) => {
   const { startDate, endDate, date, days, limit, search } = req.query;
@@ -91,7 +92,7 @@ export const getAttendanceLogs = expressAsyncHandler(async (req, res) => {
       staffQuery.department = user.department;
     }
 
-    const staffs = await Staff.find(staffQuery).select("_id");
+    const staffs = await Staff.find(staffQuery).select('_id');
 
     staffMatchFilter.staffId = {
       $in: staffs.map((staff) => staff._id),
@@ -100,7 +101,7 @@ export const getAttendanceLogs = expressAsyncHandler(async (req, res) => {
     const staffs = await Staff.find({
       office: user.office,
       department: user.department,
-    }).select("_id");
+    }).select('_id');
 
     staffMatchFilter.staffId = {
       $in: staffs.map((staff) => staff._id),
@@ -111,16 +112,12 @@ export const getAttendanceLogs = expressAsyncHandler(async (req, res) => {
     ...filters,
     ...staffMatchFilter,
   })
-    .populate("staffId", "fullName staffId")
-    .populate("logs")
+    .populate('staffId', 'fullName staffId')
+    .populate('logs')
     .sort({ date: -1, createdAt: -1 })
     .limit(limit && !isNaN(Number(limit)) ? Number(limit) : undefined);
 
-  return new ApiResponse(
-    200,
-    attendances,
-    "All attendance fetched successfully"
-  ).send(res);
+  return new ApiResponse(200, attendances, 'All attendance fetched successfully').send(res);
 });
 
 export const getAttendanceLogsByMonth = expressAsyncHandler(async (req, res) => {
@@ -237,19 +234,50 @@ export const putHrAdjustment = expressAsyncHandler(async (req, res) => {
   const { adjustments } = req.body;
 
   // Validate the inputs
-  if (!['None', 'Half-day to Full-day', 'Absent to Half-day', 'Hourly'].includes(adjustments)) {
+  if (!['None', 'Half-day to Full-day', 'Present to Half-day', 'Hourly'].includes(adjustments)) {
     throw new ApiError(400, 'Validation Failed!', [
       {
         field: 'adjustments',
-        message: 'Invalid adjustment type. Allowed: None/Half-day to Full-day/Absent to Half-day/Hourly',
+        message: 'Invalid adjustment type. Allowed: None/Half-day to Full-day/Present to Half-day/Hourly',
       },
     ]);
   }
 
   const attendance = await Attendance.findById(id);
+
   if (!attendance) {
     throw new ApiError(404, "Attendance record doesn't exist.", [
-      { field: 'id', message: 'Attendance record not found.' },
+      {
+        field: 'id',
+        message: 'Attendance record not found.',
+      },
+    ]);
+  }
+
+  // ==============================
+  // Attendance Calculation Check
+  // ==============================
+  const startOfDay = new Date(attendance.date);
+  startOfDay.setHours(0, 0, 0, 0);
+
+  const endOfDay = new Date(attendance.date);
+  endOfDay.setHours(23, 59, 59, 999);
+
+  const attendanceLock = await AttendanceCalculation.findOne({
+    office: attendance.office,
+    date: {
+      $gte: startOfDay,
+      $lte: endOfDay,
+    },
+    locked: true,
+  });
+
+  if (!attendanceLock) {
+    throw new ApiError(400, 'Validation Failed!', [
+      {
+        field: 'date',
+        message: 'Attendance has not been calculated for the selected date. Please calculate attendance first.',
+      },
     ]);
   }
 
@@ -269,8 +297,14 @@ export const putHrAdjustment = expressAsyncHandler(async (req, res) => {
 
   attendance.hrAdjustments.adjustments = adjustments;
   attendance.hrAdjustments.adjustedBy = req.admin._id;
+
   await attendance.save();
-  return new ApiResponse(200, attendance, 'HR adjustment updated successfully.').send(res);
+
+  return new ApiResponse(
+    200,
+    attendance,
+    'HR adjustment updated successfully.'
+  ).send(res);
 });
 
 export const getAllHolidayLeave = expressAsyncHandler(async (req, res) => {
@@ -282,6 +316,8 @@ export const getAllHolidayLeave = expressAsyncHandler(async (req, res) => {
 
 export const calculateAttendanceByDate = expressAsyncHandler(async (req, res) => {
   const { date } = req.params;
+
+  // Validate Date
   if (!date || !date.match(/^\d{4}-\d{2}-\d{2}$/)) {
     throw new ApiError(400, 'Validation Failed!', [
       {
@@ -290,9 +326,12 @@ export const calculateAttendanceByDate = expressAsyncHandler(async (req, res) =>
       },
     ]);
   }
+
   const qDate = new Date(date);
   qDate.setHours(0, 0, 0, 0);
+
   const currentDate = getCurrentDate();
+
   if (qDate > new Date(currentDate)) {
     throw new ApiError(400, 'Validation Failed!', [
       {
@@ -302,7 +341,19 @@ export const calculateAttendanceByDate = expressAsyncHandler(async (req, res) =>
     ]);
   }
 
-  const allStaff = await Staff.find({ office: req.admin.office }).select('_id office');
+  const attendanceCalculation = await AttendanceCalculation.findOne({
+    office: req.admin.office,
+    date: qDate,
+    locked: true,
+  });
+
+  if (attendanceCalculation) {
+    throw new ApiError(400, `Attendance already calculated for ${date}.`);
+  }
+
+  const allStaff = await Staff.find({
+    office: req.admin.office,
+  }).select('_id office');
 
   const failedStaff = [];
 
@@ -311,7 +362,11 @@ export const calculateAttendanceByDate = expressAsyncHandler(async (req, res) =>
       await autoAttendanceCalculateByStaffId(staff.office, staff._id, qDate);
     } catch (error) {
       console.error(`[Attendance][calculate-by-date] Failed for staffId=${staff._id}, date=${date}:`, error.message);
-      failedStaff.push({ staffId: staff._id, error: error.message });
+
+      failedStaff.push({
+        staffId: staff._id,
+        error: error.message,
+      });
     }
   }
 
@@ -322,11 +377,24 @@ export const calculateAttendanceByDate = expressAsyncHandler(async (req, res) =>
     );
   }
 
+  if (failedStaff.length === 0) {
+    await AttendanceCalculation.create({
+      office: req.admin.office,
+      date: qDate,
+      locked: true,
+      calculatedBy: req.admin._id,
+    });
+  }
+
   return new ApiResponse(
     200,
-    { total: allStaff.length, failed: failedStaff.length, failedStaff },
+    {
+      total: allStaff.length,
+      failed: failedStaff.length,
+      failedStaff,
+    },
     failedStaff.length > 0
-      ? `Attendance calculated with ${failedStaff.length} failure(s). Check server logs.`
+      ? `Attendance calculated with ${failedStaff.length} failure(s).`
       : 'Attendance calculated successfully.'
   ).send(res);
 });

@@ -2,6 +2,7 @@ import expressAsyncHandler from 'express-async-handler';
 import { ApiResponse, ApiError } from '../utils/responseHandler.js';
 import { EntryExitLog } from '../models/entryExitLog.model.js';
 import { Staff } from '../models/staff.model.js';
+import { AttendanceCalculation } from '../models/attendanceCalculation.model.js';
 import { autoAttendanceCalculateByStaffId } from '../services/attendance.service.js';
 import { parseISO, isValid, format, subDays } from 'date-fns';
 import {
@@ -219,6 +220,30 @@ export const manualEntryLog = expressAsyncHandler(async (req, res) => {
       { field: 'staffId', message: 'Staff is inactive or has not joined yet.' },
     ]);
 
+  const startOfDay = new Date(date);
+  startOfDay.setHours(0, 0, 0, 0);
+
+  const endOfDay = new Date(date);
+  endOfDay.setHours(23, 59, 59, 999);
+
+  const attendanceLock = await AttendanceCalculation.findOne({
+    office: req.admin.office,
+    date: {
+      $gte: startOfDay,
+      $lte: endOfDay,
+    },
+    locked: true,
+  });
+
+  if (attendanceLock) {
+    throw new ApiError(400, 'Validation Failed!', [
+      {
+        field: 'date',
+        message: 'Attendance has already been calculated for the selected date. Entry/Exit logs cannot be modified.',
+      },
+    ]);
+  }
+
   // Fetch the latest log for the staff on the given date
   const latestLog = await EntryExitLog.findOne({ staff: staff_id, date }).sort({ slNo: -1 });
 
@@ -255,6 +280,30 @@ export const editEntryLog = expressAsyncHandler(async (req, res) => {
   if (log.exitTime) {
     throw new ApiError(400, 'Validation Failed!', [
       { field: 'entryTime', message: 'Cannot edit entry time for a completed log.' },
+    ]);
+  }
+
+  const startOfDay = new Date(log.date);
+  startOfDay.setHours(0, 0, 0, 0);
+
+  const endOfDay = new Date(log.date);
+  endOfDay.setHours(23, 59, 59, 999);
+
+  const attendanceLock = await AttendanceCalculation.findOne({
+    office: req.admin.office,
+    date: {
+      $gte: startOfDay,
+      $lte: endOfDay,
+    },
+    locked: true,
+  });
+
+  if (attendanceLock) {
+    throw new ApiError(400, 'Validation Failed!', [
+      {
+        field: 'date',
+        message: 'Attendance has already been calculated for the selected date. Entry/Exit logs cannot be modified.',
+      },
     ]);
   }
 
@@ -302,7 +351,31 @@ export const editEntryLog = expressAsyncHandler(async (req, res) => {
 
 export const manualExitLog = expressAsyncHandler(async (req, res) => {
   const { log_id, date, exit_time } = req.body;
-  // Fetch the latest incomplete log for the staff on the given date
+
+  const startOfDay = new Date(date);
+  startOfDay.setHours(0, 0, 0, 0);
+
+  const endOfDay = new Date(date);
+  endOfDay.setHours(23, 59, 59, 999);
+
+  const attendanceLock = await AttendanceCalculation.findOne({
+    office: req.admin.office,
+    date: {
+      $gte: startOfDay,
+      $lte: endOfDay,
+    },
+    locked: true,
+  });
+
+  if (attendanceLock) {
+    throw new ApiError(400, 'Validation Failed!', [
+      {
+        field: 'date',
+        message: 'Attendance has already been calculated for the selected date. Entry/Exit logs cannot be modified.',
+      },
+    ]);
+  }
+
   const latestLog = await EntryExitLog.findById(log_id);
 
   if (!latestLog || latestLog.exitTime) {
@@ -392,11 +465,7 @@ export const getEntryExitLogs = expressAsyncHandler(async (req, res) => {
     .populate('staff', 'fullName staffId')
     .sort({ date: -1, entryTime: -1 });
 
-  return new ApiResponse(
-    200,
-    entryExitLogs,
-    'Entry exit logs fetched successfully.'
-  ).send(res);
+  return new ApiResponse(200, entryExitLogs, 'Entry exit logs fetched successfully.').send(res);
 });
 
 export const getEntryExitLogsByMonth = expressAsyncHandler(async (req, res) => {

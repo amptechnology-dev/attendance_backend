@@ -90,7 +90,7 @@ export const getPreviousMonthSalary = expressAsyncHandler(async (req, res) => {
     month: previousMonthNumber,
     year: previousMonthYear,
   }).populate('staff', 'fullName staffId');
-  data.sort((a, b) => a.staff.fullName.localeCompare(b.staff.fullName));
+  data.sort((a, b) => (a.staff?.fullName || '').localeCompare(b.staff?.fullName || ''));
 
   return new ApiResponse(200, data, 'Previous month salary fetched successfully.').send(res);
 });

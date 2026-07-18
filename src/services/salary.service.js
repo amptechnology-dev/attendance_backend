@@ -48,8 +48,11 @@ const autoCalculateAllSalaryByMonth = async (officeId, month, year) => {
     if (!staffList.length) throw new Error('No staff found for the given office.');
 
     const daysInMonth = getDaysInMonth(new Date(year, month - 1));
-    const lateAllowed = dutyTiming.lateAllowed; //TODO: late allowed count
     const dailyWorkHours = parseInt(dutyTiming.endTime.split(':')[0]) - parseInt(dutyTiming.startTime.split(':')[0]);
+
+    // FIX: halfDayAllowed যদি config-এ না থাকে বা ভুল value থাকে, তাহলে safe default = 2
+    const halfDayAllowed =
+      Number.isFinite(dutyTiming.halfDayAllowed) && dutyTiming.halfDayAllowed >= 0 ? dutyTiming.halfDayAllowed : 2;
 
     //Main Calculation
     const results = await Promise.all(
@@ -58,20 +61,17 @@ const autoCalculateAllSalaryByMonth = async (officeId, month, year) => {
           logger.info(
             `Skipping salary calculation for ${staff.fullName} (${staff._id}) - Monthly salary not configured.`
           );
-
           return {
             staffId: staff._id,
             staffName: staff.fullName,
             message: 'Monthly salary not configured. Salary calculation skipped.',
           };
         }
+
         const overtimeRate = staff.overtimeRate || 0;
         const attendanceData = await Attendance.find({
           staffId: staff._id,
-          date: {
-            $gte: monthStartDate,
-            $lte: monthEndDate,
-          },
+          date: { $gte: monthStartDate, $lte: monthEndDate },
         });
 
         let totalFullDays = 0,
@@ -102,6 +102,7 @@ const autoCalculateAllSalaryByMonth = async (officeId, month, year) => {
           } else if (attendance.status === 'half-day') {
             totalHalfDays++;
           } else if (attendance.status === 'absent' || attendance.status === 'present') {
+            // Shortul #2: Absent বা Present (কোনো leave ছাড়া) => পুরো ১ দিনের বেতন কাটা হবে
             attendance.leaveStatus === 'paid' ? totalPaidLeaves++ : totalUnpaidLeaves++;
           }
         });
@@ -123,10 +124,10 @@ const autoCalculateAllSalaryByMonth = async (officeId, month, year) => {
           return { staffId: staff._id, message: 'No attendance recorded. Skipping salary calculation.' };
         }
 
-        // Calculate Salary Breakdown
-        const allowedHalfDays = Math.min(dutyTiming.halfDayAllowed, totalHalfDays);
-        const extraHalfDays = totalHalfDays - allowedHalfDays;
+        const forgivenHalfDays = Math.min(halfDayAllowed, totalHalfDays);
+        const extraHalfDays = totalHalfDays - forgivenHalfDays;
         const unpaidHalfDays = extraHalfDays * 0.5;
+
         const totalUnpaidDays = totalUnpaidLeaves + holidayLeavesCount + unpaidHalfDays;
         const dailyRate = staff.monthlySalary / daysInMonth;
         const hourlyPay = totalHourPay * (dailyRate / dailyWorkHours);
@@ -151,6 +152,8 @@ const autoCalculateAllSalaryByMonth = async (officeId, month, year) => {
           pfDeduction = (salaryStructure.pf_rate / 100) * pfWage;
         }
         let esiDeduction = staff.esiNo && grossSalary <= 21000 ? (salaryStructure.esi_rate / 100) * grossSalary : 0;
+
+        // Shortul #3: Professional Tax — অপরিবর্তিত, getPtax থেকেই আসছে
         const pTax = getPtax(grossSalary);
 
         let totalDeductions = Math.round(esiDeduction + pfDeduction + pTax + leaveDeduction);
@@ -160,20 +163,18 @@ const autoCalculateAllSalaryByMonth = async (officeId, month, year) => {
         // Deduct Advance
         let advanceDeduction = 0;
         if (netSalary >= staff.advanceSalary?.monthlyDeduction) {
-          // Deduct Advance if salary is greater than monthly deduction
           advanceDeduction = await deductAdvanceSalary(staff._id, month, year);
           totalDeductions += advanceDeduction;
           netSalary = Math.round(grossSalary - totalDeductions);
         }
 
         const unpaidHolidayLeaveDeduction = Math.min(holidayLeavesCount * dailyRate, grossSalary);
-        // Save Salary Data
+
         await Salary.updateOne(
           { office: officeId, staff: staff._id, month, year },
           {
             baseSalary,
             totalPayableDays: daysInMonth,
-            // totalWorkingDays: payableDays,
             attendanceDetails: { totalFullDays, totalHalfDays, totalHourPay, overtimeHours },
             leaves: {
               totalPaidLeaves,
