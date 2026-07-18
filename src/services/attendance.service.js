@@ -10,6 +10,7 @@ import logger from '../config/logger.js';
 import { getLocalMonthBoundariesFormatted, getCurrentDate } from '../utils/dateTime.utils.js';
 import { OffDayWork } from '../models/offDayWork.model.js';
 import { startOfMonth, endOfMonth, format } from 'date-fns';
+import { AttendanceCalculation } from '../models/attendanceCalculation.model.js';
 
 const toMinutePrecision = (date) => {
   const d = new Date(date);
@@ -336,68 +337,56 @@ export const getMissingAttendanceDates = async (office, month, year) => {
   const requestedDate = new Date(selectedYear, selectedMonth, 1);
   const currentMonthDate = new Date(now.getFullYear(), now.getMonth(), 1);
 
+  // Future month
   if (requestedDate > currentMonthDate) {
     return [];
   }
 
   const startDate = startOfMonth(requestedDate);
+
   let endDate = endOfMonth(requestedDate);
 
-  if (selectedMonth === now.getMonth() && selectedYear === now.getFullYear()) {
+  // Current month => Yesterday পর্যন্ত
+  if (
+    selectedMonth === now.getMonth() &&
+    selectedYear === now.getFullYear()
+  ) {
     endDate = new Date(now);
     endDate.setDate(endDate.getDate() - 1);
     endDate.setHours(23, 59, 59, 999);
   }
 
-  const logs = await EntryExitLog.find({
+  const calculations = await AttendanceCalculation.find({
     office,
-    date: { $gte: startDate, $lte: endDate },
-    $or: [{ entryTime: { $ne: null } }, { exitTime: { $ne: null } }],
-  })
-    .select('staff date')
-    .populate('staff', 'fullName staffId');
+    locked: true,
+    date: {
+      $gte: startDate,
+      $lte: endDate,
+    },
+  }).select('date');
 
-  const attendances = await Attendance.find({
-    office,
-    date: { $gte: startDate, $lte: endDate },
-  }).select('staffId date');
-
-  const attendanceSet = new Set(
-    attendances.map((a) => `${a.staffId.toString()}-${format(new Date(a.date), 'yyyy-MM-dd')}`)
+  const calculatedDates = new Set(
+    calculations.map((item) =>
+      format(new Date(item.date), 'yyyy-MM-dd')
+    )
   );
 
-  const missingByDate = new Map();
-
-  for (const log of logs) {
-    if (!log.staff) continue;
-
-    const dayString = format(new Date(log.date), 'yyyy-MM-dd');
-    const staffIdStr = log.staff._id.toString();
-    const key = `${staffIdStr}-${dayString}`;
-
-    if (attendanceSet.has(key)) continue;
-
-    if (!missingByDate.has(dayString)) {
-      missingByDate.set(dayString, new Map());
-    }
-    missingByDate.get(dayString).set(staffIdStr, {
-      _id: staffIdStr,
-      fullName: log.staff.fullName,
-      staffId: log.staff.staffId,
-    });
-  }
+  const allDates = eachDayOfInterval({
+    start: startDate,
+    end: endDate,
+  });
 
   const response = [];
-  for (const [date, staffMap] of missingByDate.entries()) {
-    const employees = Array.from(staffMap.values());
-    response.push({
-      date,
-      employeeCount: employees.length,
-      employees,
-    });
-  }
 
-  response.sort((a, b) => new Date(a.date) - new Date(b.date));
+  for (const day of allDates) {
+    const formattedDate = format(day, 'yyyy-MM-dd');
+
+    if (!calculatedDates.has(formattedDate)) {
+      response.push({
+        date: formattedDate,
+      });
+    }
+  }
 
   return response;
 };
