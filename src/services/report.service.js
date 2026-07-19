@@ -77,10 +77,7 @@ export const generateAttendanceReport = async (filters) => {
     const sort = { [sortBy]: sortOrder === 'desc' ? -1 : 1 };
 
     // base query
-    let query = Attendance.find(filter)
-      .select('-__v -logs -office')
-      .populate('staffId', 'staffId fullName')
-      .sort(sort);
+    let query = Attendance.find(filter).select('-__v -logs -office').populate('staffId', 'staffId fullName').sort(sort);
 
     // apply pagination ONLY if limit provided
     if (limit) {
@@ -210,10 +207,8 @@ export const generateMonthlyAttendanceReport = async (filters) => {
   let toDate = endDate ? new Date(endDate) : null;
   if (month) {
     const [year, monthNumber] = month.split('-').map(Number);
-    // JS Date month index is 0-based
     fromDate = new Date(year, monthNumber - 1, 1);
     toDate = new Date(year, monthNumber, 0, 23, 59, 59, 999);
-    // last day of month
   }
   if (fromDate && toDate) {
     matchStage.date = {
@@ -222,14 +217,12 @@ export const generateMonthlyAttendanceReport = async (filters) => {
     };
   }
 
-  // staff filter
   if (staff) {
     matchStage.staffId = staff;
   }
 
   return Attendance.aggregate([
     { $match: matchStage },
-    // Join staff
     {
       $lookup: {
         from: 'staffs',
@@ -240,7 +233,6 @@ export const generateMonthlyAttendanceReport = async (filters) => {
     },
     { $unwind: '$staff' },
 
-    // department filter (after staff join)
     ...(department
       ? [
           {
@@ -251,7 +243,6 @@ export const generateMonthlyAttendanceReport = async (filters) => {
         ]
       : []),
 
-    // Join department
     {
       $lookup: {
         from: 'departments',
@@ -262,7 +253,6 @@ export const generateMonthlyAttendanceReport = async (filters) => {
     },
     { $unwind: '$department' },
 
-    // Extract entry/exit
     {
       $lookup: {
         from: 'entryexitlogs',
@@ -278,7 +268,6 @@ export const generateMonthlyAttendanceReport = async (filters) => {
       },
     },
 
-    // Group by staff
     {
       $group: {
         _id: {
@@ -298,34 +287,44 @@ export const generateMonthlyAttendanceReport = async (filters) => {
             $cond: [{ $eq: ['$status', 'half-day'] }, 1, 0],
           },
         },
+        presents: {
+          $sum: {
+            $cond: [{ $eq: ['$status', 'present'] }, 1, 0],
+          },
+        },
         absents: {
           $sum: {
             $cond: [{ $eq: ['$status', 'absent'] }, 1, 0],
           },
         },
+        hrAdjustments: {
+          $sum: {
+            $cond: [{ $ne: ['$hrAdjustments.adjustments', 'None'] }, 1, 0],
+          },
+        },
         attendances: {
           $push: {
+            _id: '$_id',
             date: '$date',
             entryTime: '$entryTime',
             exitTime: '$exitTime',
             status: '$status',
+            hrAdjustment: '$hrAdjustments.adjustments',
           },
         },
       },
     },
     {
       $match: {
-        attendances: { $ne: [] }, // remove staff with no attendance
+        attendances: { $ne: [] },
       },
     },
-    // Sort by name
     {
       $sort: {
         staffName: 1,
       },
     },
 
-    // Group by department
     {
       $group: {
         _id: '$_id.department',
@@ -337,7 +336,9 @@ export const generateMonthlyAttendanceReport = async (filters) => {
             staffName: '$staffName',
             fullDays: '$fullDays',
             halfDays: '$halfDays',
+            presents: '$presents',
             absents: '$absents',
+            hrAdjustments: '$hrAdjustments', // FIX: response-এ যোগ
             attendances: '$attendances',
           },
         },
@@ -503,18 +504,7 @@ export const generateYearlyAttendanceReport = async (filters) => {
 };
 
 export const generateSalaryReport = async (filters) => {
-  const {
-    startMonth,
-    endMonth,
-    month,
-    office,
-    staff,
-    status,
-    sortBy,
-    sortOrder = 'asc',
-    limit,
-    page = 1,
-  } = filters;
+  const { startMonth, endMonth, month, office, staff, status, sortBy, sortOrder = 'asc', limit, page = 1 } = filters;
 
   try {
     let filter = { office };
@@ -534,10 +524,7 @@ export const generateSalaryReport = async (filters) => {
         const [startYear, startMonthNumber] = startMonth.split('-').map(Number);
 
         rangeQuery.push({
-          $or: [
-            { year: { $gt: startYear } },
-            { year: startYear, month: { $gte: startMonthNumber } },
-          ],
+          $or: [{ year: { $gt: startYear } }, { year: startYear, month: { $gte: startMonthNumber } }],
         });
       }
 
@@ -545,10 +532,7 @@ export const generateSalaryReport = async (filters) => {
         const [endYear, endMonthNumber] = endMonth.split('-').map(Number);
 
         rangeQuery.push({
-          $or: [
-            { year: { $lt: endYear } },
-            { year: endYear, month: { $lte: endMonthNumber } },
-          ],
+          $or: [{ year: { $lt: endYear } }, { year: endYear, month: { $lte: endMonthNumber } }],
         });
       }
 
@@ -574,10 +558,7 @@ export const generateSalaryReport = async (filters) => {
         };
 
     // base query
-    let query = Salary.find(filter)
-      .select('-__v -office -breakdown')
-      .populate('staff', 'staffId fullName')
-      .sort(sort);
+    let query = Salary.find(filter).select('-__v -office -breakdown').populate('staff', 'staffId fullName').sort(sort);
 
     // apply pagination ONLY if limit provided
     if (limit) {
@@ -743,10 +724,7 @@ export const generateLeavesReport = async (filters) => {
     const sort = { [sortBy]: sortOrder === 'desc' ? -1 : 1 };
 
     // Base query
-    let query = Leave.find(filter)
-      .select('-__v -office -document')
-      .populate('staff', 'staffId fullName')
-      .sort(sort);
+    let query = Leave.find(filter).select('-__v -office -document').populate('staff', 'staffId fullName').sort(sort);
 
     // Apply pagination only if limit exists
     if (limit) {
@@ -1432,16 +1410,7 @@ export const generateEsiEcrCsv = async (office, month, year) => {
 };
 
 export const generateHolidayFundReport = async (filters) => {
-  const {
-    startMonth,
-    endMonth,
-    office,
-    staff,
-    sortBy,
-    sortOrder = 'asc',
-    limit,
-    page = 1,
-  } = filters;
+  const { startMonth, endMonth, office, staff, sortBy, sortOrder = 'asc', limit, page = 1 } = filters;
 
   try {
     let filter = { office };
@@ -1454,10 +1423,7 @@ export const generateHolidayFundReport = async (filters) => {
         const [startYear, startMonthNumber] = startMonth.split('-').map(Number);
 
         rangeQuery.push({
-          $or: [
-            { year: { $gt: startYear } },
-            { year: startYear, month: { $gte: startMonthNumber } },
-          ],
+          $or: [{ year: { $gt: startYear } }, { year: startYear, month: { $gte: startMonthNumber } }],
         });
       }
 
@@ -1465,10 +1431,7 @@ export const generateHolidayFundReport = async (filters) => {
         const [endYear, endMonthNumber] = endMonth.split('-').map(Number);
 
         rangeQuery.push({
-          $or: [
-            { year: { $lt: endYear } },
-            { year: endYear, month: { $lte: endMonthNumber } },
-          ],
+          $or: [{ year: { $lt: endYear } }, { year: endYear, month: { $lte: endMonthNumber } }],
         });
       }
 
@@ -1491,10 +1454,7 @@ export const generateHolidayFundReport = async (filters) => {
         };
 
     // Base query
-    let query = HolidayFund.find(filter)
-      .select('-__v -office')
-      .populate('staff', 'staffId fullName')
-      .sort(sort);
+    let query = HolidayFund.find(filter).select('-__v -office').populate('staff', 'staffId fullName').sort(sort);
 
     // Apply pagination only if limit exists
     if (limit) {

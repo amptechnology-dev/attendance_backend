@@ -5,11 +5,13 @@ import {
   getAttendanceLogsByMonth,
   getTodayAttendance,
   putHrAdjustment,
+  getMonthlyAttendanceByAttendanceId,
+  bulkHrAdjustment,
   getAllHolidayLeave,
   calculateAttendanceByDate,
   assignOffDayWork,
   getAllOffDayWorkAssigned,
-  getMissingAttendanceReport
+  getMissingAttendanceReport,
 } from '../controllers/attendance.controller.js';
 import { adminAuth, hasPermission } from '../middlewares/auth.middleware.js';
 import { permissions } from '../config/constants.js';
@@ -19,6 +21,11 @@ router.route('/get').get(hasPermission(permissions.VIEW_ATTENDANCE), getAttendan
 router.route('/get-by-month').get(hasPermission(permissions.VIEW_ATTENDANCE), getAttendanceLogsByMonth);
 router.route('/get-today').get(hasPermission(permissions.VIEW_ATTENDANCE), getTodayAttendance);
 router.route('/hr-adjustment/:id').put(hasPermission(permissions.MANAGE_ATTENDANCE), putHrAdjustment);
+router.route('/bulk-hr-adjustment').put(hasPermission(permissions.MANAGE_ATTENDANCE), bulkHrAdjustment);
+router
+  .route('/get-attendance-month/:id')
+  .get(hasPermission(permissions.VIEW_ATTENDANCE), getMonthlyAttendanceByAttendanceId);
+
 router.route('/holiday-leave/get').get(getAllHolidayLeave);
 router
   .route('/calculate-by-date/:date')

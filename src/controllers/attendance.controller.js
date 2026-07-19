@@ -307,6 +307,178 @@ export const putHrAdjustment = expressAsyncHandler(async (req, res) => {
   ).send(res);
 });
 
+export const getMonthlyAttendanceByAttendanceId = expressAsyncHandler(async (req, res) => {
+  const { id } = req.params;
+
+  // Find the selected attendance
+  const attendance = await Attendance.findById(id);
+
+  if (!attendance) {
+    throw new ApiError(404, "Attendance record doesn't exist.", [
+      {
+        field: 'id',
+        message: 'Attendance record not found.',
+      },
+    ]);
+  }
+
+  // Get month start & end
+  const attendanceDate = new Date(attendance.date);
+
+  const startOfMonth = new Date(
+    attendanceDate.getFullYear(),
+    attendanceDate.getMonth(),
+    1
+  );
+  startOfMonth.setHours(0, 0, 0, 0);
+
+  const endOfMonth = new Date(
+    attendanceDate.getFullYear(),
+    attendanceDate.getMonth() + 1,
+    0
+  );
+  endOfMonth.setHours(23, 59, 59, 999);
+
+  // Fetch all attendance of same staff for that month
+  const monthlyAttendance = await Attendance.find({
+    office: attendance.office,
+    staffId: attendance.staffId,
+    date: {
+      $gte: startOfMonth,
+      $lte: endOfMonth,
+    },
+  })
+    .select('_id date status hrAdjustments.adjustments')
+    .sort({ date: 1 });
+
+  return new ApiResponse(
+    200,
+    monthlyAttendance,
+    'Monthly attendance fetched successfully.'
+  ).send(res);
+});
+
+export const bulkHrAdjustment = expressAsyncHandler(async (req, res) => {
+  const { attendanceIds, adjustments } = req.body;
+
+  // ==============================
+  // Validation
+  // ==============================
+  if (
+    ![
+      'None',
+      'Half-day to Full-day',
+      'Present to Half-day',
+      'Hourly',
+    ].includes(adjustments)
+  ) {
+    throw new ApiError(400, 'Validation Failed!', [
+      {
+        field: 'adjustments',
+        message:
+          'Invalid adjustment type. Allowed: None/Half-day to Full-day/Present to Half-day/Hourly',
+      },
+    ]);
+  }
+
+  if (!Array.isArray(attendanceIds) || attendanceIds.length === 0) {
+    throw new ApiError(400, 'Validation Failed!', [
+      {
+        field: 'attendanceIds',
+        message: 'Please select at least one attendance record.',
+      },
+    ]);
+  }
+
+  // ==============================
+  // Fetch Attendances
+  // ==============================
+  const attendances = await Attendance.find({
+    _id: { $in: attendanceIds },
+  });
+
+  if (attendances.length !== attendanceIds.length) {
+    throw new ApiError(404, 'Validation Failed!', [
+      {
+        field: 'attendanceIds',
+        message: 'One or more attendance records were not found.',
+      },
+    ]);
+  }
+
+  // ==============================
+  // Validate each attendance
+  // ==============================
+  for (const attendance of attendances) {
+    // Attendance Calculation Check
+    const startOfDay = new Date(attendance.date);
+    startOfDay.setHours(0, 0, 0, 0);
+
+    const endOfDay = new Date(attendance.date);
+    endOfDay.setHours(23, 59, 59, 999);
+
+    const attendanceLock = await AttendanceCalculation.findOne({
+      office: attendance.office,
+      date: {
+        $gte: startOfDay,
+        $lte: endOfDay,
+      },
+      locked: true,
+    });
+
+    if (!attendanceLock) {
+      throw new ApiError(400, 'Validation Failed!', [
+        {
+          field: 'date',
+          message: `Attendance has not been calculated for ${attendance.date.toISOString().slice(0, 10)}.`,
+        },
+      ]);
+    }
+
+    // Status validation
+    if (
+      (adjustments === 'Present to Half-day' &&
+        attendance.status !== 'present') ||
+      (adjustments === 'Hourly' &&
+        attendance.status !== 'present') ||
+      (adjustments === 'Half-day to Full-day' &&
+        attendance.status !== 'half-day')
+    ) {
+      throw new ApiError(400, 'Validation Failed!', [
+        {
+          field: 'adjustments',
+          message: `Invalid adjustment for attendance dated ${attendance.date.toISOString().slice(0, 10)}.`,
+        },
+      ]);
+    }
+  }
+
+  // ==============================
+  // Update all attendances
+  // ==============================
+  await Attendance.updateMany(
+    {
+      _id: { $in: attendanceIds },
+    },
+    {
+      $set: {
+        'hrAdjustments.adjustments': adjustments,
+        'hrAdjustments.adjustedBy': req.admin._id,
+      },
+    }
+  );
+
+  const updatedAttendances = await Attendance.find({
+    _id: { $in: attendanceIds },
+  });
+
+  return new ApiResponse(
+    200,
+    updatedAttendances,
+    'HR adjustments updated successfully.'
+  ).send(res);
+});
+
 export const getAllHolidayLeave = expressAsyncHandler(async (req, res) => {
   const holidayLeaves = await Leave.find({ office: req.admin.office, type: 'holidayLeave' })
     .populate('staff', 'fullName id')
