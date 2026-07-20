@@ -234,11 +234,23 @@ export const putHrAdjustment = expressAsyncHandler(async (req, res) => {
   const { adjustments } = req.body;
 
   // Validate the inputs
-  if (!['None', 'Half-day to Full-day', 'Present to Half-day', 'Hourly'].includes(adjustments)) {
+  // FIX: নতুন ৩টা adjustment type validation list-এ যোগ করা হলো
+  if (
+    ![
+      'None',
+      'Half-day to Full-day',
+      'Present to Half-day',
+      'Hourly',
+      'Present to Full-day',
+      'Absent to Half-day',
+      'Absent to Full-day',
+    ].includes(adjustments)
+  ) {
     throw new ApiError(400, 'Validation Failed!', [
       {
         field: 'adjustments',
-        message: 'Invalid adjustment type. Allowed: None/Half-day to Full-day/Present to Half-day/Hourly',
+        message:
+          'Invalid adjustment type. Allowed: None/Half-day to Full-day/Present to Half-day/Hourly/Present to Full-day/Absent to Half-day/Absent to Full-day',
       },
     ]);
   }
@@ -282,10 +294,14 @@ export const putHrAdjustment = expressAsyncHandler(async (req, res) => {
   }
 
   // Status validation
+  // FIX: নতুন ৩টা adjustment-এর জন্য current status validation যোগ করা হলো
   if (
     (adjustments === 'Present to Half-day' && attendance.status !== 'present') ||
     (adjustments === 'Hourly' && attendance.status !== 'present') ||
-    (adjustments === 'Half-day to Full-day' && attendance.status !== 'half-day')
+    (adjustments === 'Half-day to Full-day' && attendance.status !== 'half-day') ||
+    (adjustments === 'Present to Full-day' && attendance.status !== 'present') ||
+    (adjustments === 'Absent to Half-day' && attendance.status !== 'absent') ||
+    (adjustments === 'Absent to Full-day' && attendance.status !== 'absent')
   ) {
     throw new ApiError(400, 'Validation Failed!', [
       {
@@ -364,19 +380,23 @@ export const bulkHrAdjustment = expressAsyncHandler(async (req, res) => {
   // ==============================
   // Validation
   // ==============================
+  // FIX: নতুন ৩টা adjustment type validation list-এ যোগ করা হলো
   if (
     ![
       'None',
       'Half-day to Full-day',
       'Present to Half-day',
       'Hourly',
+      'Present to Full-day',
+      'Absent to Half-day',
+      'Absent to Full-day',
     ].includes(adjustments)
   ) {
     throw new ApiError(400, 'Validation Failed!', [
       {
         field: 'adjustments',
         message:
-          'Invalid adjustment type. Allowed: None/Half-day to Full-day/Present to Half-day/Hourly',
+          'Invalid adjustment type. Allowed: None/Half-day to Full-day/Present to Half-day/Hourly/Present to Full-day/Absent to Half-day/Absent to Full-day',
       },
     ]);
   }
@@ -436,13 +456,20 @@ export const bulkHrAdjustment = expressAsyncHandler(async (req, res) => {
     }
 
     // Status validation
+    // FIX: নতুন ৩টা adjustment-এর জন্য current status validation যোগ করা হলো
     if (
       (adjustments === 'Present to Half-day' &&
         attendance.status !== 'present') ||
       (adjustments === 'Hourly' &&
         attendance.status !== 'present') ||
       (adjustments === 'Half-day to Full-day' &&
-        attendance.status !== 'half-day')
+        attendance.status !== 'half-day') ||
+      (adjustments === 'Present to Full-day' &&
+        attendance.status !== 'present') ||
+      (adjustments === 'Absent to Half-day' &&
+        attendance.status !== 'absent') ||
+      (adjustments === 'Absent to Full-day' &&
+        attendance.status !== 'absent')
     ) {
       throw new ApiError(400, 'Validation Failed!', [
         {

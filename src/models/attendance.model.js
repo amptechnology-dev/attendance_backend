@@ -54,7 +54,15 @@ const AttendanceSchema = new mongoose.Schema(
     hrAdjustments: {
       adjustments: {
         type: String,
-        enum: ['None', 'Half-day to Full-day', 'Present to Half-day', 'Hourly'],
+        enum: [
+          'None',
+          'Half-day to Full-day',
+          'Present to Half-day',
+          'Hourly',
+          'Present to Full-day',
+          'Absent to Half-day',
+          'Absent to Full-day',
+        ],
         default: 'None',
       },
       adjustedBy: {

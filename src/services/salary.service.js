@@ -96,13 +96,21 @@ const autoCalculateAllSalaryByMonth = async (officeId, month, year) => {
                 totalHourlyDays++;
                 totalHourPay += attendance.totalWorkTime;
                 break;
+              case 'Present to Full-day':
+                totalFullDays++;
+                break;
+              case 'Absent to Half-day':
+                totalHalfDays++;
+                break;
+              case 'Absent to Full-day':
+                totalFullDays++;
+                break;
             }
           } else if (attendance.status === 'full-day') {
             totalFullDays++;
           } else if (attendance.status === 'half-day') {
             totalHalfDays++;
           } else if (attendance.status === 'absent' || attendance.status === 'present') {
-            // Shortul #2: Absent বা Present (কোনো leave ছাড়া) => পুরো ১ দিনের বেতন কাটা হবে
             attendance.leaveStatus === 'paid' ? totalPaidLeaves++ : totalUnpaidLeaves++;
           }
         });
