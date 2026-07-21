@@ -20,7 +20,7 @@ app.use(express.json({ limit: '16kb' }));
 app.use(express.urlencoded({ extended: true, limit: '16kb' }));
 app.use(express.static('public'));
 app.use(cookieParser(process.env.COOKIE_SECRET));
-scheduleJobs(); // Schedule cron jobs
+// scheduleJobs(); 
 
 //routes import
 import publicRouter from './routes/public.routes.js';

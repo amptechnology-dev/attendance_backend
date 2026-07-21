@@ -151,7 +151,7 @@ export const generateAttendancePDF = async (officeName, data, filters) => {
   };
 
   // Table headers
-  const headers = [['Date', 'Staff ID', 'Staff Name', 'Wroking Time', 'Break Time', 'Status', 'HR Adjustments']];
+  const headers = [['Date', 'Staff ID', 'Staff Name', 'Working Time', 'Break Time', 'Status', 'HR Adjustments']];
 
   // Table rows
   const rows = data?.map((row) => [
@@ -183,7 +183,7 @@ export const generateAttendancePDF = async (officeName, data, filters) => {
 
 export const generateAttendanceCsv = async (data) => {
   // headers
-  const headers = ['Date', 'Staff ID', 'Staff Name', 'Firsrt Half', 'Second Half', 'Status', 'HR Adjustments'];
+  const headers = ['Date', 'Staff ID', 'Staff Name', 'First Half', 'Second Half', 'Status', 'HR Adjustments'];
   // rows
   const rows = data?.map((row) => [
     format(row.date, 'dd-MM-yyyy'),
@@ -205,11 +205,13 @@ export const generateMonthlyAttendanceReport = async (filters) => {
 
   let fromDate = startDate ? new Date(startDate) : null;
   let toDate = endDate ? new Date(endDate) : null;
+
   if (month) {
     const [year, monthNumber] = month.split('-').map(Number);
     fromDate = new Date(year, monthNumber - 1, 1);
     toDate = new Date(year, monthNumber, 0, 23, 59, 59, 999);
   }
+
   if (fromDate && toDate) {
     matchStage.date = {
       $gte: fromDate,
@@ -223,6 +225,7 @@ export const generateMonthlyAttendanceReport = async (filters) => {
 
   return Attendance.aggregate([
     { $match: matchStage },
+
     {
       $lookup: {
         from: 'staffs',
@@ -261,6 +264,7 @@ export const generateMonthlyAttendanceReport = async (filters) => {
         as: 'logs',
       },
     },
+
     {
       $addFields: {
         entryTime: { $min: '$logs.entryTime' },
@@ -274,34 +278,42 @@ export const generateMonthlyAttendanceReport = async (filters) => {
           staff: '$staff._id',
           department: '$department._id',
         },
+
         staffId: { $first: '$staff.staffId' },
+        pfNo: { $first: '$staff.pfNo' }, // <-- Added
         staffName: { $first: '$staff.fullName' },
         departmentName: { $first: '$department.name' },
+
         fullDays: {
           $sum: {
             $cond: [{ $eq: ['$status', 'full-day'] }, 1, 0],
           },
         },
+
         halfDays: {
           $sum: {
             $cond: [{ $eq: ['$status', 'half-day'] }, 1, 0],
           },
         },
+
         presents: {
           $sum: {
             $cond: [{ $eq: ['$status', 'present'] }, 1, 0],
           },
         },
+
         absents: {
           $sum: {
             $cond: [{ $eq: ['$status', 'absent'] }, 1, 0],
           },
         },
+
         hrAdjustments: {
           $sum: {
             $cond: [{ $ne: ['$hrAdjustments.adjustments', 'None'] }, 1, 0],
           },
         },
+
         attendances: {
           $push: {
             _id: '$_id',
@@ -314,11 +326,13 @@ export const generateMonthlyAttendanceReport = async (filters) => {
         },
       },
     },
+
     {
       $match: {
         attendances: { $ne: [] },
       },
     },
+
     {
       $sort: {
         staffName: 1,
@@ -328,22 +342,28 @@ export const generateMonthlyAttendanceReport = async (filters) => {
     {
       $group: {
         _id: '$_id.department',
-        departmentName: { $first: '$departmentName' },
+
+        departmentName: {
+          $first: '$departmentName',
+        },
+
         staffReports: {
           $push: {
             staff: '$_id.staff',
             staffId: '$staffId',
+            pfNo: '$pfNo', // <-- Added
             staffName: '$staffName',
             fullDays: '$fullDays',
             halfDays: '$halfDays',
             presents: '$presents',
             absents: '$absents',
-            hrAdjustments: '$hrAdjustments', // FIX: response-এ যোগ
+            hrAdjustments: '$hrAdjustments',
             attendances: '$attendances',
           },
         },
       },
     },
+
     {
       $sort: {
         departmentName: 1,
