@@ -288,7 +288,7 @@ export const putHrAdjustment = expressAsyncHandler(async (req, res) => {
     throw new ApiError(400, 'Validation Failed!', [
       {
         field: 'date',
-        message: 'Attendance has not been calculated for the selected date. Please calculate attendance first.',
+        message: `Attendance has not been calculated for ${attendance.date.toISOString().slice(0, 10)}. Please calculate attendance first.`,
       },
     ]);
   }
