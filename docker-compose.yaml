@@ -4,9 +4,12 @@ services:
     build: .
     env_file:
       - .env
+    expose:
+      - '8001'
+    command: sh -c "node src/index.js"   # match however main project starts
     networks:
       - shared-nginx-net
-    restart: unless-stopped # ← ADD THIS
+    restart: unless-stopped
 
 networks:
   shared-nginx-net:
