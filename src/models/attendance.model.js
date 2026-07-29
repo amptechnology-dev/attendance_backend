@@ -33,7 +33,7 @@ const AttendanceSchema = new mongoose.Schema(
       default: 'absent',
     },
     breakTime: {
-      type: Number, // Store total break time in minutes
+      type: Number,
       default: 0,
     },
     logs: [
@@ -62,6 +62,9 @@ const AttendanceSchema = new mongoose.Schema(
           'Present to Full-day',
           'Absent to Half-day',
           'Absent to Full-day',
+          'Present to Absent',
+          'Half-day to Absent',
+          'Full-day to Absent',
         ],
         default: 'None',
       },
@@ -71,13 +74,13 @@ const AttendanceSchema = new mongoose.Schema(
       },
     },
     totalWorkTime: {
-      type: Number, // Store total worked time in minutes
+      type: Number,
       default: 0,
     },
     leaveStatus: {
       type: String,
       enum: ['paid', 'unpaid'],
-      default: null, // null means not applied
+      default: null,
     },
     isOffDayWork: { type: Boolean, default: false },
     offDayAssignmentId: { type: mongoose.Schema.Types.ObjectId, ref: 'OffDayWork' },

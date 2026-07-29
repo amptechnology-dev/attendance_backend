@@ -50,7 +50,6 @@ const autoCalculateAllSalaryByMonth = async (officeId, month, year) => {
     const daysInMonth = getDaysInMonth(new Date(year, month - 1));
     const dailyWorkHours = parseInt(dutyTiming.endTime.split(':')[0]) - parseInt(dutyTiming.startTime.split(':')[0]);
 
-    // FIX: halfDayAllowed যদি config-এ না থাকে বা ভুল value থাকে, তাহলে safe default = 2
     const halfDayAllowed =
       Number.isFinite(dutyTiming.halfDayAllowed) && dutyTiming.halfDayAllowed >= 0 ? dutyTiming.halfDayAllowed : 2;
 
@@ -104,6 +103,14 @@ const autoCalculateAllSalaryByMonth = async (officeId, month, year) => {
                 break;
               case 'Absent to Full-day':
                 totalFullDays++;
+                break;
+              // FIX: যেকোনো status থেকে Absent-এ adjust হলে, সেটাকে ঠিক
+              // normal absent-এর মতোই unpaid/paid leave হিসেবে গণনা করা হচ্ছে —
+              // নিচের else-if ব্র্যাঞ্চে status==='absent' যেভাবে হ্যান্ডল হয়, ঠিক সেই লজিক অনুসরণ করে
+              case 'Present to Absent':
+              case 'Half-day to Absent':
+              case 'Full-day to Absent':
+                attendance.leaveStatus === 'paid' ? totalPaidLeaves++ : totalUnpaidLeaves++;
                 break;
             }
           } else if (attendance.status === 'full-day') {
@@ -161,7 +168,6 @@ const autoCalculateAllSalaryByMonth = async (officeId, month, year) => {
         }
         let esiDeduction = staff.esiNo && grossSalary <= 21000 ? (salaryStructure.esi_rate / 100) * grossSalary : 0;
 
-        // Shortul #3: Professional Tax — অপরিবর্তিত, getPtax থেকেই আসছে
         const pTax = getPtax(grossSalary);
 
         let totalDeductions = Math.round(esiDeduction + pfDeduction + pTax + leaveDeduction);

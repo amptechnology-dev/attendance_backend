@@ -233,8 +233,6 @@ export const putHrAdjustment = expressAsyncHandler(async (req, res) => {
   const { id } = req.params;
   const { adjustments } = req.body;
 
-  // Validate the inputs
-  // FIX: নতুন ৩টা adjustment type validation list-এ যোগ করা হলো
   if (
     ![
       'None',
@@ -244,13 +242,16 @@ export const putHrAdjustment = expressAsyncHandler(async (req, res) => {
       'Present to Full-day',
       'Absent to Half-day',
       'Absent to Full-day',
+      'Present to Absent',
+      'Half-day to Absent',
+      'Full-day to Absent',
     ].includes(adjustments)
   ) {
     throw new ApiError(400, 'Validation Failed!', [
       {
         field: 'adjustments',
         message:
-          'Invalid adjustment type. Allowed: None/Half-day to Full-day/Present to Half-day/Hourly/Present to Full-day/Absent to Half-day/Absent to Full-day',
+          'Invalid adjustment type. Allowed: None/Half-day to Full-day/Present to Half-day/Hourly/Present to Full-day/Absent to Half-day/Absent to Full-day/Present to Absent/Half-day to Absent/Full-day to Absent',
       },
     ]);
   }
@@ -294,14 +295,17 @@ export const putHrAdjustment = expressAsyncHandler(async (req, res) => {
   }
 
   // Status validation
-  // FIX: নতুন ৩টা adjustment-এর জন্য current status validation যোগ করা হলো
+  // FIX: নতুন ৩টা "...to Absent" adjustment-এর জন্য current status validation যোগ করা হলো
   if (
     (adjustments === 'Present to Half-day' && attendance.status !== 'present') ||
     (adjustments === 'Hourly' && attendance.status !== 'present') ||
     (adjustments === 'Half-day to Full-day' && attendance.status !== 'half-day') ||
     (adjustments === 'Present to Full-day' && attendance.status !== 'present') ||
     (adjustments === 'Absent to Half-day' && attendance.status !== 'absent') ||
-    (adjustments === 'Absent to Full-day' && attendance.status !== 'absent')
+    (adjustments === 'Absent to Full-day' && attendance.status !== 'absent') ||
+    (adjustments === 'Present to Absent' && attendance.status !== 'present') ||
+    (adjustments === 'Half-day to Absent' && attendance.status !== 'half-day') ||
+    (adjustments === 'Full-day to Absent' && attendance.status !== 'full-day')
   ) {
     throw new ApiError(400, 'Validation Failed!', [
       {
@@ -316,11 +320,7 @@ export const putHrAdjustment = expressAsyncHandler(async (req, res) => {
 
   await attendance.save();
 
-  return new ApiResponse(
-    200,
-    attendance,
-    'HR adjustment updated successfully.'
-  ).send(res);
+  return new ApiResponse(200, attendance, 'HR adjustment updated successfully.').send(res);
 });
 
 export const getMonthlyAttendanceByAttendanceId = expressAsyncHandler(async (req, res) => {
@@ -341,18 +341,10 @@ export const getMonthlyAttendanceByAttendanceId = expressAsyncHandler(async (req
   // Get month start & end
   const attendanceDate = new Date(attendance.date);
 
-  const startOfMonth = new Date(
-    attendanceDate.getFullYear(),
-    attendanceDate.getMonth(),
-    1
-  );
+  const startOfMonth = new Date(attendanceDate.getFullYear(), attendanceDate.getMonth(), 1);
   startOfMonth.setHours(0, 0, 0, 0);
 
-  const endOfMonth = new Date(
-    attendanceDate.getFullYear(),
-    attendanceDate.getMonth() + 1,
-    0
-  );
+  const endOfMonth = new Date(attendanceDate.getFullYear(), attendanceDate.getMonth() + 1, 0);
   endOfMonth.setHours(23, 59, 59, 999);
 
   // Fetch all attendance of same staff for that month
@@ -367,11 +359,7 @@ export const getMonthlyAttendanceByAttendanceId = expressAsyncHandler(async (req
     .select('_id date status hrAdjustments.adjustments')
     .sort({ date: 1 });
 
-  return new ApiResponse(
-    200,
-    monthlyAttendance,
-    'Monthly attendance fetched successfully.'
-  ).send(res);
+  return new ApiResponse(200, monthlyAttendance, 'Monthly attendance fetched successfully.').send(res);
 });
 
 export const bulkHrAdjustment = expressAsyncHandler(async (req, res) => {
@@ -380,7 +368,7 @@ export const bulkHrAdjustment = expressAsyncHandler(async (req, res) => {
   // ==============================
   // Validation
   // ==============================
-  // FIX: নতুন ৩টা adjustment type validation list-এ যোগ করা হলো
+  // FIX: নতুন ৩টা "...to Absent" adjustment type validation list-এ যোগ করা হলো
   if (
     ![
       'None',
@@ -390,13 +378,16 @@ export const bulkHrAdjustment = expressAsyncHandler(async (req, res) => {
       'Present to Full-day',
       'Absent to Half-day',
       'Absent to Full-day',
+      'Present to Absent',
+      'Half-day to Absent',
+      'Full-day to Absent',
     ].includes(adjustments)
   ) {
     throw new ApiError(400, 'Validation Failed!', [
       {
         field: 'adjustments',
         message:
-          'Invalid adjustment type. Allowed: None/Half-day to Full-day/Present to Half-day/Hourly/Present to Full-day/Absent to Half-day/Absent to Full-day',
+          'Invalid adjustment type. Allowed: None/Half-day to Full-day/Present to Half-day/Hourly/Present to Full-day/Absent to Half-day/Absent to Full-day/Present to Absent/Half-day to Absent/Full-day to Absent',
       },
     ]);
   }
@@ -456,20 +447,17 @@ export const bulkHrAdjustment = expressAsyncHandler(async (req, res) => {
     }
 
     // Status validation
-    // FIX: নতুন ৩টা adjustment-এর জন্য current status validation যোগ করা হলো
+    // FIX: নতুন ৩টা "...to Absent" adjustment-এর জন্য current status validation যোগ করা হলো
     if (
-      (adjustments === 'Present to Half-day' &&
-        attendance.status !== 'present') ||
-      (adjustments === 'Hourly' &&
-        attendance.status !== 'present') ||
-      (adjustments === 'Half-day to Full-day' &&
-        attendance.status !== 'half-day') ||
-      (adjustments === 'Present to Full-day' &&
-        attendance.status !== 'present') ||
-      (adjustments === 'Absent to Half-day' &&
-        attendance.status !== 'absent') ||
-      (adjustments === 'Absent to Full-day' &&
-        attendance.status !== 'absent')
+      (adjustments === 'Present to Half-day' && attendance.status !== 'present') ||
+      (adjustments === 'Hourly' && attendance.status !== 'present') ||
+      (adjustments === 'Half-day to Full-day' && attendance.status !== 'half-day') ||
+      (adjustments === 'Present to Full-day' && attendance.status !== 'present') ||
+      (adjustments === 'Absent to Half-day' && attendance.status !== 'absent') ||
+      (adjustments === 'Absent to Full-day' && attendance.status !== 'absent') ||
+      (adjustments === 'Present to Absent' && attendance.status !== 'present') ||
+      (adjustments === 'Half-day to Absent' && attendance.status !== 'half-day') ||
+      (adjustments === 'Full-day to Absent' && attendance.status !== 'full-day')
     ) {
       throw new ApiError(400, 'Validation Failed!', [
         {
@@ -499,11 +487,7 @@ export const bulkHrAdjustment = expressAsyncHandler(async (req, res) => {
     _id: { $in: attendanceIds },
   });
 
-  return new ApiResponse(
-    200,
-    updatedAttendances,
-    'HR adjustments updated successfully.'
-  ).send(res);
+  return new ApiResponse(200, updatedAttendances, 'HR adjustments updated successfully.').send(res);
 });
 
 export const getAllHolidayLeave = expressAsyncHandler(async (req, res) => {
