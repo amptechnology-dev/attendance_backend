@@ -13,7 +13,7 @@ const SalarySchema = new mongoose.Schema(
       required: true,
     },
     month: {
-      type: Number, // 1-12
+      type: Number,
       required: true,
     },
     year: {
@@ -45,18 +45,19 @@ const SalarySchema = new mongoose.Schema(
       leaveDeduction: { type: Number, default: 0 },
     },
     breakdown: {
-      basic: { type: Number, required: true }, // % of baseSalary
-      hra: { type: Number, required: true }, // % of baseSalary
-      conveyance: { type: Number, required: true }, // % of baseSalary
-      specialAllowance: { type: Number, default: 0 }, // Optional special allowance
-      otherAllowance: { type: Number, default: 0 }, // Optional allowance
-      esi: { type: Number, default: 0 }, // ESI deduction
-      pf: { type: Number, default: 0 }, // PF deduction
-      pTax: { type: Number, default: 0 }, // Professional Tax
-      hourlyPay: { type: Number, default: 0 }, // Hourly pay
-      bonus: { type: Number, default: 0 }, // Calculated bonus
-      overtime: { type: Number, default: 0 }, // Calculated: overtime_hours * overtime_rate
-      advanceDeduction: { type: Number, default: 0 }, // Deduction for advance salary
+      basic: { type: Number, required: true },
+      da: { type: Number, default: 0 },
+      hra: { type: Number, default: 0 },
+      conveyance: { type: Number, default: 0 },
+      otherAllowance: { type: Number, default: 0 },
+      specialAllowance: { type: Number, default: 0 },
+      esi: { type: Number, default: 0 },
+      pf: { type: Number, default: 0 },
+      pTax: { type: Number, default: 0 },
+      hourlyPay: { type: Number, default: 0 },
+      bonus: { type: Number, default: 0 },
+      overtime: { type: Number, default: 0 },
+      advanceDeduction: { type: Number, default: 0 },
     },
     deductions: {
       type: Number,
@@ -75,6 +76,10 @@ const SalarySchema = new mongoose.Schema(
       enum: ['pending', 'finalized', 'paid'],
       default: 'pending',
     },
+    manualConveyance: {
+      type: Number,
+      default: 0,
+    },
     paymentDate: Date,
     transactionId: String,
   },
@@ -89,15 +94,82 @@ const SalaryStructureShema = new mongoose.Schema(
       type: mongoose.Schema.Types.ObjectId,
       ref: 'Office',
       required: true,
+      unique: true, // one structure per office
     },
-    basic_percentage: { type: Number, default: 50 },
-    hra_allowance_percentage: { type: Number, default: 25 },
-    conveyance_allowance_percentage: { type: Number, default: 10 },
-    special_allowance_percentage: { type: Number, default: 5 },
-    other_allowance_percentage: { type: Number, default: 10 },
-    esi_rate: { type: Number, default: 0.75 },
-    pf_rate: { type: Number, default: 12 },
-    bonus_rate: { type: Number, default: 8.33 },
+
+    grossSalary: {
+      calculationType: {
+        type: String,
+        enum: ['perDay', 'fixed'], // perDay = days*rate, fixed = staff.monthlySalary as-is
+        default: 'fixed',
+      },
+    },
+
+    basicSalary: {
+      calculationType: {
+        type: String,
+        enum: ['perDay', 'fixed'],
+        default: 'fixed',
+      },
+      percentage: { type: Number, default: 50, min: 0, max: 100 },
+    },
+
+    da: {
+      enabled: { type: Boolean, default: false },
+      percentage: { type: Number, default: 0, min: 0, max: 100 }, // % of Basic
+    },
+
+    hra: {
+      enabled: { type: Boolean, default: false },
+      calculateOn: {
+        type: String,
+        enum: ['basic', 'gross', 'basicPlusDa'],
+        default: 'basic',
+      },
+      percentage: { type: Number, default: 0, min: 0, max: 100 },
+    },
+
+    conveyance: {
+      enabled: { type: Boolean, default: false },
+      mode: {
+        type: String,
+        enum: ['input', 'readonly'], // input = manual value/month, readonly = % auto-calculated
+        default: 'input',
+      },
+      percentage: { type: Number, default: 0, min: 0, max: 100 }, // used only when mode === 'readonly'
+    },
+
+    specialAllowance: {
+      enabled: { type: Boolean, default: false },
+    },
+
+    otherAllowance: {
+      enabled: { type: Boolean, default: false },
+      percentage: { type: Number, default: 0, min: 0, max: 100 }, 
+    },
+
+    pf: {
+      enabled: { type: Boolean, default: false },
+      calculateOn: {
+        type: String,
+        enum: ['basic', 'basicPlusDa'],
+        default: 'basic',
+      },
+      rate: { type: Number, default: 12 },
+      wageCeiling: { type: Number, default: 15000 },
+    },
+
+    esi: {
+      enabled: { type: Boolean, default: false },
+      rate: { type: Number, default: 0.75 },
+      wageCeiling: { type: Number, default: 21000 },
+    },
+
+    pTax: {
+      enabled: { type: Boolean, default: false },
+    },
+
+    bonus_rate: { type: Number, default: 8.33 }, // retained, still unused in calc (TODO from your original code)
   },
   { timestamps: true }
 );

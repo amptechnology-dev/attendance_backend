@@ -10,9 +10,12 @@ import {
   markAdvanceAsPaid,
   getSalaryPdfByStaff,
   getSalaryPdfByMonth,
+  getSalaryExcelByMonth,
+  getSalaryTablesByMonth,
   getAdvanceSalaryTransactions,
   getHolidayFundTransactions,
   getPastMonthSalary,
+  updateManualConveyance
 } from '../controllers/salary.controller.js';
 import { adminAuth } from '../middlewares/auth.middleware.js';
 import validate from '../middlewares/validator.middleware.js';
@@ -33,7 +36,10 @@ router.route('/advance/update').put(validate(updateAdvanceSalaryValidationSchema
 router.route('/advance/mark-as-paid').post(markAdvanceAsPaid);
 router.route('/slip/get-by-staff').post(parseMonthInput, validate(monthYearSchema), getSalaryPdfByStaff);
 router.route('/slip/get-by-month').post(parseMonthInput, validate(monthYearSchema), getSalaryPdfByMonth);
+router.route('/excel/get-by-month').post(parseMonthInput, validate(monthYearSchema), getSalaryExcelByMonth);
+router.route('/table/get-by-month').post(parseMonthInput, validate(monthYearSchema), getSalaryTablesByMonth);
 router.route('/advance-transaction/get').get(getAdvanceSalaryTransactions);
 router.route('/holiday-fund-transaction/get').get(getHolidayFundTransactions);
+router.route('/:salaryId/conveyance/update').put(updateManualConveyance);
 
 export default router;

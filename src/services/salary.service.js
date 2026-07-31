@@ -1,10 +1,12 @@
 import { Salary, SalaryStructure, AdvanceTransaction } from '../models/salary.model.js';
 import { Staff } from '../models/staff.model.js';
+import { SalaryCalculation } from '../models/salaryCalculation.model.js';
 import { Attendance } from '../models/attendance.model.js';
 import { DutyTiming } from '../models/dutyTiming.model.js';
 import { getDaysInMonth } from 'date-fns';
 import logger from '../config/logger.js';
 import { jsPDF } from 'jspdf';
+import ExcelJS from 'exceljs';
 import autoTable from 'jspdf-autotable';
 import { format } from 'date-fns';
 import { Leave } from '../models/leave.model.js';
@@ -15,7 +17,7 @@ import { ApiError } from '../utils/responseHandler.js';
 
 let calculationStatus = {};
 
-export const autoCalculateAllSalary = async (officeId, month, year) => {
+export const autoCalculateAllSalary = async (officeId, month, year, adminId) => {
   const key = `${officeId}-${month}-${year}`;
   if (calculationStatus[key]) {
     throw new Error('Calculation is already in progress.');
@@ -35,8 +37,26 @@ export const autoCalculateAllSalary = async (officeId, month, year) => {
   }
 };
 
+const calculatePTax = (grossSalary) => {
+  if (grossSalary < 10000) return 0;
+  if (grossSalary < 15001) return 110;
+  if (grossSalary < 25001) return 130;
+  if (grossSalary < 40001) return 150;
+  return 200;
+};
+
 const autoCalculateAllSalaryByMonth = async (officeId, month, year) => {
   try {
+    const alreadyCalculated = await SalaryCalculation.findOne({
+      office: officeId,
+      month,
+      year,
+      locked: true,
+    });
+
+    if (alreadyCalculated) {
+      throw new Error(`Salary for ${month}/${year} has already been calculated.`);
+    }
     const salaryStructure = await SalaryStructure.findOne({ office: officeId });
     if (!salaryStructure) throw new Error('Salary configuration not found.');
     const { startDate: monthStartDate, endDate: monthEndDate } = getMonthBoundariesFormatted(month, year);
@@ -53,7 +73,6 @@ const autoCalculateAllSalaryByMonth = async (officeId, month, year) => {
     const halfDayAllowed =
       Number.isFinite(dutyTiming.halfDayAllowed) && dutyTiming.halfDayAllowed >= 0 ? dutyTiming.halfDayAllowed : 2;
 
-    //Main Calculation
     const results = await Promise.all(
       staffList.map(async (staff) => {
         if (!staff.monthlySalary || staff.monthlySalary <= 0) {
@@ -81,7 +100,6 @@ const autoCalculateAllSalaryByMonth = async (officeId, month, year) => {
           totalUnpaidLeaves = 0,
           totalHourlyDays = 0;
 
-        // Process HR adjustments first
         attendanceData.forEach((attendance) => {
           if (attendance.hrAdjustments.adjustments !== 'None') {
             switch (attendance.hrAdjustments.adjustments) {
@@ -104,9 +122,6 @@ const autoCalculateAllSalaryByMonth = async (officeId, month, year) => {
               case 'Absent to Full-day':
                 totalFullDays++;
                 break;
-              // FIX: যেকোনো status থেকে Absent-এ adjust হলে, সেটাকে ঠিক
-              // normal absent-এর মতোই unpaid/paid leave হিসেবে গণনা করা হচ্ছে —
-              // নিচের else-if ব্র্যাঞ্চে status==='absent' যেভাবে হ্যান্ডল হয়, ঠিক সেই লজিক অনুসরণ করে
               case 'Present to Absent':
               case 'Half-day to Absent':
               case 'Full-day to Absent':
@@ -122,7 +137,6 @@ const autoCalculateAllSalaryByMonth = async (officeId, month, year) => {
           }
         });
 
-        // Fetch all holidayLeaves for the staff in the given month
         const holidayLeaves = await Leave.find({
           staff: staff._id,
           office: officeId,
@@ -144,31 +158,88 @@ const autoCalculateAllSalaryByMonth = async (officeId, month, year) => {
         const unpaidHalfDays = extraHalfDays * 0.5;
 
         const totalUnpaidDays = totalUnpaidLeaves + holidayLeavesCount + unpaidHalfDays;
+        const paidDays = daysInMonth - totalUnpaidDays;
+
         const dailyRate = staff.monthlySalary / daysInMonth;
         const hourlyPay = totalHourPay * (dailyRate / dailyWorkHours);
-
-        const leaveDeduction = Math.min(dailyRate * totalUnpaidDays, staff.monthlySalary);
-
-        // Base salary is full month salary
-        const baseSalary = staff.monthlySalary;
         const overtimePay = overtimeHours * overtimeRate;
-        const bonus = 0; // TODO: calculate bonus
-        const grossSalary = Math.round(baseSalary - totalHourlyDays * dailyRate + hourlyPay + overtimePay + bonus);
+        const bonus = 0; // TODO: bonus calculation
 
-        const basic = (salaryStructure.basic_percentage / 100) * grossSalary;
-        const hra = (salaryStructure.hra_allowance_percentage / 100) * grossSalary;
-        const conveyance = (salaryStructure.conveyance_allowance_percentage / 100) * grossSalary;
-        const specialAllowance = (salaryStructure.special_allowance_percentage / 100) * grossSalary;
-        const otherAllowance = (salaryStructure.other_allowance_percentage / 100) * grossSalary;
+        const baseSalary = staff.monthlySalary;
 
-        let pfDeduction = 0;
-        if (staff.pfNo) {
-          const pfWage = Math.min(basic, 15000); // cap at 15k
-          pfDeduction = (salaryStructure.pf_rate / 100) * pfWage;
+        // ---------- GROSS SALARY ----------
+        let grossSalary;
+        let leaveDeduction = 0;
+
+        if (salaryStructure.grossSalary.calculationType === 'perDay') {
+          grossSalary = Math.round(
+            dailyRate * paidDays - totalHourlyDays * dailyRate + hourlyPay + overtimePay + bonus
+          );
+        } else {
+          grossSalary = Math.round(baseSalary - totalHourlyDays * dailyRate + hourlyPay + overtimePay + bonus);
+          leaveDeduction = Math.min(dailyRate * totalUnpaidDays, baseSalary);
         }
-        let esiDeduction = staff.esiNo && grossSalary <= 21000 ? (salaryStructure.esi_rate / 100) * grossSalary : 0;
 
-        const pTax = getPtax(grossSalary);
+        // ---------- BASIC SALARY ----------
+        let basic;
+        if (salaryStructure.basicSalary.calculationType === 'perDay') {
+          const basicDailyRate = ((salaryStructure.basicSalary.percentage / 100) * baseSalary) / daysInMonth;
+          basic = basicDailyRate * paidDays;
+        } else {
+          basic = (salaryStructure.basicSalary.percentage / 100) * grossSalary;
+        }
+
+        // ---------- DA ----------
+        const da = salaryStructure.da.enabled ? (salaryStructure.da.percentage / 100) * basic : 0;
+        // ---------- OTHER ALLOWANCE ----------
+        const otherAllowance = salaryStructure.otherAllowance.enabled
+          ? (salaryStructure.otherAllowance.percentage / 100) * basic
+          : 0;
+
+        // ---------- HRA ----------
+        let hra = 0;
+        if (salaryStructure.hra.enabled) {
+          const hraBase =
+            salaryStructure.hra.calculateOn === 'gross'
+              ? grossSalary
+              : salaryStructure.hra.calculateOn === 'basicPlusDa'
+                ? basic + da
+                : basic;
+          hra = (salaryStructure.hra.percentage / 100) * hraBase;
+        }
+
+        // ---------- CONVEYANCE ----------
+        let conveyance = 0;
+        if (salaryStructure.conveyance.enabled) {
+          if (salaryStructure.conveyance.mode === 'readonly') {
+            conveyance = (salaryStructure.conveyance.percentage / 100) * grossSalary;
+          } else {
+            // TODO: wire manual conveyance amount source (staff.conveyanceAmount or monthly override)
+            conveyance = 0;
+          }
+        }
+
+        // ---------- SPECIAL ALLOWANCE ----------
+        const specialAllowance = salaryStructure.specialAllowance.enabled
+          ? Math.max(0, grossSalary - basic - da - hra)
+          : 0;
+
+        // ---------- PF ----------
+        let pfDeduction = 0;
+        if (salaryStructure.pf.enabled && staff.pfNo) {
+          const pfBase = salaryStructure.pf.calculateOn === 'basicPlusDa' ? basic + da : basic;
+          const pfWage = Math.min(pfBase, salaryStructure.pf.wageCeiling);
+          pfDeduction = (salaryStructure.pf.rate / 100) * pfWage;
+        }
+
+        // ---------- ESI ----------
+        let esiDeduction = 0;
+        if (salaryStructure.esi.enabled && staff.esiNo && baseSalary <= salaryStructure.esi.wageCeiling) {
+          esiDeduction = (salaryStructure.esi.rate / 100) * baseSalary;
+        }
+
+        // ---------- PTAX ----------
+        const pTax = salaryStructure.pTax.enabled ? calculatePTax(grossSalary) : 0;
 
         let totalDeductions = Math.round(esiDeduction + pfDeduction + pTax + leaveDeduction);
         totalDeductions = Math.min(totalDeductions, grossSalary);
@@ -184,37 +255,78 @@ const autoCalculateAllSalaryByMonth = async (officeId, month, year) => {
 
         const unpaidHolidayLeaveDeduction = Math.min(holidayLeavesCount * dailyRate, grossSalary);
 
+        // ================================================================
+        // DYNAMIC FIELD INCLUSION — only push a breakdown key into $set if
+        // its corresponding settings toggle is enabled; otherwise $unset it
+        // so it never persists in the document (not even as 0).
+        // ================================================================
+        const setFields = {
+          baseSalary,
+          totalPayableDays: daysInMonth,
+          attendanceDetails: { totalFullDays, totalHalfDays, totalHourPay, overtimeHours },
+          leaves: {
+            totalPaidLeaves,
+            totalUnpaidLeaves,
+            totalHolidayLeaves: holidayLeavesCount,
+            leaveDeduction: Math.round(leaveDeduction),
+          },
+          'breakdown.basic': basic,
+          deductions: totalDeductions,
+          grossSalary,
+          netSalary,
+        };
+        const unsetFields = {};
+
+        // DA
+        if (salaryStructure.da.enabled) setFields['breakdown.da'] = da;
+        else unsetFields['breakdown.da'] = '';
+
+        if (salaryStructure.otherAllowance.enabled) setFields['breakdown.otherAllowance'] = otherAllowance;
+        else unsetFields['breakdown.otherAllowance'] = '';
+
+        // HRA
+        if (salaryStructure.hra.enabled) setFields['breakdown.hra'] = hra;
+        else unsetFields['breakdown.hra'] = '';
+
+        // Conveyance
+        if (salaryStructure.conveyance.enabled) setFields['breakdown.conveyance'] = conveyance;
+        else unsetFields['breakdown.conveyance'] = '';
+
+        // Special Allowance
+        if (salaryStructure.specialAllowance.enabled) setFields['breakdown.specialAllowance'] = specialAllowance;
+        else unsetFields['breakdown.specialAllowance'] = '';
+
+        // ESI
+        if (salaryStructure.esi.enabled && staff.esiNo) setFields['breakdown.esi'] = esiDeduction;
+        else unsetFields['breakdown.esi'] = '';
+
+        // PF
+        if (salaryStructure.pf.enabled && staff.pfNo) setFields['breakdown.pf'] = pfDeduction;
+        else unsetFields['breakdown.pf'] = '';
+
+        // PTax
+        if (salaryStructure.pTax.enabled) setFields['breakdown.pTax'] = pTax;
+        else unsetFields['breakdown.pTax'] = '';
+
+        // Hourly pay — only persist if hourly-adjusted attendance actually occurred this month
+        if (totalHourlyDays > 0) setFields['breakdown.hourlyPay'] = hourlyPay;
+        else unsetFields['breakdown.hourlyPay'] = '';
+
+        // Bonus — TODO: not calculated yet, so never persisted until implemented
+        unsetFields['breakdown.bonus'] = '';
+
+        // Overtime — only persist if overtime hours actually logged this month
+        if (overtimeHours > 0) setFields['breakdown.overtime'] = overtimePay;
+        else unsetFields['breakdown.overtime'] = '';
+
+        // Advance deduction — only persist if an advance was actually deducted
+        if (advanceDeduction > 0) setFields['breakdown.advanceDeduction'] = advanceDeduction;
+        else unsetFields['breakdown.advanceDeduction'] = '';
+
         await Salary.updateOne(
           { office: officeId, staff: staff._id, month, year },
-          {
-            baseSalary,
-            totalPayableDays: daysInMonth,
-            attendanceDetails: { totalFullDays, totalHalfDays, totalHourPay, overtimeHours },
-            leaves: {
-              totalPaidLeaves,
-              totalUnpaidLeaves,
-              totalHolidayLeaves: holidayLeavesCount,
-              leaveDeduction: Math.round(leaveDeduction),
-            },
-            breakdown: {
-              basic,
-              hra,
-              conveyance,
-              specialAllowance,
-              otherAllowance,
-              esi: esiDeduction,
-              pf: pfDeduction,
-              pTax,
-              hourlyPay,
-              bonus,
-              overtime: overtimePay,
-              advanceDeduction,
-            },
-            deductions: totalDeductions,
-            grossSalary,
-            netSalary,
-          },
-          { upsert: true, new: true }
+          { $set: setFields, $unset: unsetFields },
+          { upsert: true }
         );
 
         if (unpaidHolidayLeaveDeduction > 0) {
@@ -224,6 +336,15 @@ const autoCalculateAllSalaryByMonth = async (officeId, month, year) => {
         return { staffId: staff._id, netSalary, message: 'Salary calculated successfully.' };
       })
     );
+
+    await SalaryCalculation.create({
+      office: officeId,
+      month,
+      year,
+      locked: true,
+      calculatedBy: null,
+    });
+
     return results;
   } catch (error) {
     logger.error('Error while auto calculating salary:', error);
@@ -577,96 +698,128 @@ function getPtax(salary) {
 }
 
 export const generateSalaryPdf = async (officeId, staffId, month, year) => {
-  const salary = await Salary.findOne({ office: officeId, staff: staffId, month, year })
-    .populate('office', 'name')
-    .populate('staff', 'fullName pfNo esiNo')
-    .lean();
+  const [salary, salaryStructure] = await Promise.all([
+    Salary.findOne({ office: officeId, staff: staffId, month, year })
+      .populate('office', 'name')
+      .populate('staff', 'fullName pfNo esiNo')
+      .lean(),
+    SalaryStructure.findOne({ office: officeId }).lean(),
+  ]);
+
   if (!salary) {
     throw new ApiError(404, 'Not Found!', 'Salary not found for the given staff and month.');
   }
+  if (!salaryStructure) {
+    throw new ApiError(404, 'Not Found!', 'Salary configuration not found for this office.');
+  }
 
   const doc = new jsPDF({ format: 'a4', orientation: 'l' });
-  // Get the page height and width
   const pageHeight = doc.internal.pageSize.height || doc.internal.pageSize.getHeight();
   const pageWidth = doc.internal.pageSize.width || doc.internal.pageSize.getWidth();
 
   doc.setFont('times', 'bold');
-  // Company Details
   doc.setFontSize(14);
   doc.setLineWidth(0.5);
-
   doc.text(
     `PAY SLIP FOR THE MONTH OF ${format(new Date(salary.year, salary.month - 1), 'MMMM').toUpperCase()} - ${salary.year}`,
     pageWidth / 2,
     10,
-    {
-      align: 'center',
-    }
+    { align: 'center' }
   );
   doc.setLineWidth(0.1);
   doc.line(pageWidth * 0.3, 11, pageWidth * 0.7, 11);
   doc.setFontSize(10);
   doc.text(salary.office?.name, pageWidth / 2, 15, { align: 'center' });
 
-  // Table headers
-  const headers = [
-    [
-      'Employee',
-      'Rate',
-      'Shifts',
-      'Basic',
-      'Conv A',
-      'HRA',
-      'SA',
-      'OA',
-      'Gross',
-      'PF',
-      'ESI',
-      'P.Tax',
-      'LOP',
-      'Adv',
-      'Deduct',
-      'Net',
-    ],
-  ];
-  const rows = [
-    [
-      salary.staff.fullName,
-      Math.round(salary.baseSalary / salary.totalPayableDays),
-      salary.totalPayableDays,
-      salary.breakdown.basic.toFixed(2),
-      salary.breakdown.conveyance.toFixed(2),
-      salary.breakdown.hra.toFixed(2),
-      salary.breakdown.specialAllowance.toFixed(2),
-      salary.breakdown.otherAllowance.toFixed(2),
-      salary.grossSalary.toFixed(2),
-      salary.breakdown.pf.toFixed(2),
-      salary.breakdown.esi.toFixed(2),
-      salary.breakdown.pTax.toFixed(2),
-      salary.leaves.leaveDeduction.toFixed(2),
-      salary.breakdown.advanceDeduction.toFixed(2),
-      salary.deductions.toFixed(2),
-      salary.netSalary,
-    ],
+  // ================================================================
+  // Column order fixed to match the office's printed pay-slip format:
+  // Name, Rate, W/D, BASIC, DA, HRA, SPL ALLOW, Other Allowance,
+  // Gross Wages, CONV, TOTAL GROSS, PF, ESI, P TAX, ADV., Net Amt.
+  //
+  // - Each optional column only renders when its toggle is enabled in
+  //   Salary Structure settings; disabled ones never appear (not even
+  //   as 0), so the printed layout matches whichever components this
+  //   office actually uses.
+  // - "Other Allowance" occupies the slot that maps to the excel
+  //   template's LWF column — LWF has no schema/calc support yet, so
+  //   Other Allowance is what fills that position when enabled.
+  // - ADV. is always shown: breakdown.advanceDeduction is a real
+  //   schema field with `default: 0`, so it's read straight from the
+  //   DB rather than conditionally hidden.
+  // - TD is omitted entirely: no field exists for it in either the
+  //   Salary or SalaryStructure schema, so there's nothing real to
+  //   show. Add it to both schemas first if you need this column.
+  // ================================================================
+  const columnDefs = [
+    { header: 'Name', getValue: (s) => s.staff?.fullName || '-' },
+    { header: 'Rate', getValue: (s) => Math.round(s.baseSalary / s.totalPayableDays) },
+    { header: 'W/D', getValue: (s) => s.totalPayableDays },
+    { header: 'BASIC', getValue: (s) => safeToFixed(s.breakdown?.basic) },
   ];
 
-  // Add table to the document
+  if (salaryStructure.da?.enabled) {
+    columnDefs.push({ header: 'DA', getValue: (s) => safeToFixed(s.breakdown?.da) });
+  }
+  if (salaryStructure.hra?.enabled) {
+    columnDefs.push({ header: 'HRA', getValue: (s) => safeToFixed(s.breakdown?.hra) });
+  }
+  if (salaryStructure.specialAllowance?.enabled) {
+    columnDefs.push({ header: 'SPL ALLOW', getValue: (s) => safeToFixed(s.breakdown?.specialAllowance) });
+  }
+  if (salaryStructure.otherAllowance?.enabled) {
+    columnDefs.push({ header: 'Other Allowance', getValue: (s) => safeToFixed(s.breakdown?.otherAllowance) });
+  }
+
+  // Gross Wages = earnings before conveyance is folded in
+  columnDefs.push({
+    header: 'Gross Wages',
+    getValue: (s) =>
+      safeToFixed(
+        (s.breakdown?.basic ?? 0) +
+          (s.breakdown?.da ?? 0) +
+          (s.breakdown?.hra ?? 0) +
+          (s.breakdown?.otherAllowance ?? 0) +
+          (s.breakdown?.specialAllowance ?? 0)
+      ),
+  });
+
+  if (salaryStructure.conveyance?.enabled) {
+    columnDefs.push({ header: 'CONV', getValue: (s) => safeToFixed(s.breakdown?.conveyance) });
+  }
+
+  columnDefs.push({ header: 'TOTAL GROSS', getValue: (s) => safeToFixed(s.grossSalary) });
+
+  if (salaryStructure.pf?.enabled) {
+    columnDefs.push({ header: 'PF', getValue: (s) => safeToFixed(s.breakdown?.pf) });
+  }
+  if (salaryStructure.esi?.enabled) {
+    columnDefs.push({ header: 'ESI', getValue: (s) => safeToFixed(s.breakdown?.esi) });
+  }
+  if (salaryStructure.pTax?.enabled) {
+    columnDefs.push({ header: 'P TAX', getValue: (s) => safeToFixed(s.breakdown?.pTax) });
+  }
+
+  // Always shown — real schema field with a default, not a toggle.
+  columnDefs.push({ header: 'ADV.', getValue: (s) => safeToFixed(s.breakdown?.advanceDeduction) });
+
+  columnDefs.push({ header: 'TD', getValue: (s) => safeToFixed(s.deductions) });
+
+  columnDefs.push({ header: 'Net Amt.', getValue: (s) => s.netSalary });
+
+  const headers = [columnDefs.map((col) => col.header)];
+  const rows = [columnDefs.map((col) => col.getValue(salary))];
+
   autoTable(doc, {
     startY: 20,
     head: headers,
     body: rows,
-    // styles: {
-    //   fontSize: 8,
-    // },
     theme: 'grid',
     didDrawPage: (data) => {
-      // For official use only
       doc.setFontSize(8);
-      const officeUseText = `For ${salary.office.name}`;
+      const officeUseText = `For ${salary.office?.name || ''}`;
       const officeTextWidth = doc.getTextWidth(officeUseText);
       doc.text(officeUseText, pageWidth - data.settings.margin.right - officeTextWidth, data.cursor.y + 15);
 
-      // End line
       doc.setLineWidth(0.2);
       doc.setLineDashPattern([2, 1]);
       doc.line(
@@ -676,58 +829,105 @@ export const generateSalaryPdf = async (officeId, staffId, month, year) => {
         data.cursor.y + 25
       );
 
-      // Footer content
       const pageCount = doc.internal.getNumberOfPages();
       const footerText = `Page ${pageCount}`;
       const generatedDate = `Generated: ${new Date().toLocaleDateString()} ${new Date().toLocaleTimeString()}`;
 
-      // Add page number to the bottom left
       doc.setFontSize(10);
       doc.text(footerText, data.settings.margin.left, pageHeight - 10);
 
-      // Add generated date to the bottom right
       const textWidth = doc.getTextWidth(generatedDate);
       doc.text(generatedDate, pageWidth - data.settings.margin.right - textWidth, pageHeight - 10);
     },
   });
 
-  // Return the PDF buffer
   return doc.output('arraybuffer');
 };
 
+const safeToFixed = (value, decimals = 2) => {
+  if (value === undefined || value === null || isNaN(value)) return (0).toFixed(decimals);
+  return Number(value).toFixed(decimals);
+};
+
 export const generateSalaryByMonth = async (officeId, month, year) => {
-  const salaries = await Salary.find({ office: officeId, month, year })
-    .populate('office', 'name')
-    .populate('staff', 'fullName pfNo esiNo')
-    .lean();
+  const [salaries, salaryStructure] = await Promise.all([
+    Salary.find({ office: officeId, month, year })
+      .populate('office', 'name')
+      .populate('staff', 'fullName pfNo esiNo')
+      .lean(),
+    SalaryStructure.findOne({ office: officeId }).lean(),
+  ]);
 
   if (!salaries.length) {
     throw new ApiError(404, 'Not Found!', 'No salaries found for the given month.');
+  }
+  if (!salaryStructure) {
+    throw new ApiError(404, 'Not Found!', 'Salary configuration not found for this office.');
   }
 
   const doc = new jsPDF({ format: 'a4', orientation: 'l' });
   const pageHeight = doc.internal.pageSize.height || doc.internal.pageSize.getHeight();
   const pageWidth = doc.internal.pageSize.width || doc.internal.pageSize.getWidth();
 
-  const headers = [
-    [
-      'Employee',
-      'Rate',
-      'Shifts',
-      'PL',
-      'Basic',
-      'Conv Allow',
-      'HRA',
-      'Special Allow',
-      'Other Allow',
-      'Gross',
-      'PF',
-      'ESI',
-      'P.Tax',
-      'Deductions',
-      'Net',
-    ],
+  // Same fixed column order as generateSalaryPdf (see comments there).
+  const columnDefs = [
+    { header: 'Name', getValue: (s) => s.staff?.fullName || '-' },
+    { header: 'Rate', getValue: (s) => s.baseSalary },
+    {
+      header: 'W/D',
+      getValue: (s) => s.attendanceDetails.totalFullDays + s.attendanceDetails.totalHalfDays,
+    },
+    { header: 'BASIC', getValue: (s) => safeToFixed(s.breakdown?.basic) },
   ];
+
+  if (salaryStructure.da?.enabled) {
+    columnDefs.push({ header: 'DA', getValue: (s) => safeToFixed(s.breakdown?.da) });
+  }
+  if (salaryStructure.hra?.enabled) {
+    columnDefs.push({ header: 'HRA', getValue: (s) => safeToFixed(s.breakdown?.hra) });
+  }
+  if (salaryStructure.specialAllowance?.enabled) {
+    columnDefs.push({ header: 'SPL ALLOW', getValue: (s) => safeToFixed(s.breakdown?.specialAllowance) });
+  }
+  if (salaryStructure.otherAllowance?.enabled) {
+    columnDefs.push({ header: 'Other Allowance', getValue: (s) => safeToFixed(s.breakdown?.otherAllowance) });
+  }
+
+  columnDefs.push({
+    header: 'Gross Wages',
+    getValue: (s) =>
+      safeToFixed(
+        (s.breakdown?.basic ?? 0) +
+          (s.breakdown?.da ?? 0) +
+          (s.breakdown?.hra ?? 0) +
+          (s.breakdown?.otherAllowance ?? 0) +
+          (s.breakdown?.specialAllowance ?? 0)
+      ),
+  });
+
+  if (salaryStructure.conveyance?.enabled) {
+    columnDefs.push({ header: 'CONV', getValue: (s) => safeToFixed(s.breakdown?.conveyance) });
+  }
+
+  columnDefs.push({ header: 'TOTAL GROSS', getValue: (s) => safeToFixed(s.grossSalary) });
+
+  if (salaryStructure.pf?.enabled) {
+    columnDefs.push({ header: 'PF', getValue: (s) => safeToFixed(s.breakdown?.pf) });
+  }
+  if (salaryStructure.esi?.enabled) {
+    columnDefs.push({ header: 'ESI', getValue: (s) => safeToFixed(s.breakdown?.esi) });
+  }
+  if (salaryStructure.pTax?.enabled) {
+    columnDefs.push({ header: 'P TAX', getValue: (s) => safeToFixed(s.breakdown?.pTax) });
+  }
+
+  columnDefs.push({ header: 'ADV.', getValue: (s) => safeToFixed(s.breakdown?.advanceDeduction) });
+
+  columnDefs.push({ header: 'TD', getValue: (s) => safeToFixed(s.deductions) });
+
+  columnDefs.push({ header: 'Net Amt.', getValue: (s) => s.netSalary });
+
+  const headers = [columnDefs.map((col) => col.header)];
 
   let rowIndex = 0;
   let startY = 20;
@@ -736,7 +936,7 @@ export const generateSalaryByMonth = async (officeId, month, year) => {
   for (const salary of salaries) {
     if (rowIndex > 0 && rowIndex % 3 === 0) {
       doc.addPage();
-      startY = 20; // Reset start position for new page
+      startY = 20;
       footerPrinted = false;
     }
     doc.setFont('times', 'bold');
@@ -755,25 +955,7 @@ export const generateSalaryByMonth = async (officeId, month, year) => {
     doc.setFontSize(10);
     doc.text(salary.office?.name, pageWidth / 2, startY - 5, { align: 'center' });
 
-    const rows = [
-      [
-        salary.staff.fullName,
-        salary.baseSalary,
-        salary.attendanceDetails.totalFullDays + salary.attendanceDetails.totalHalfDays,
-        salary.leaves.totalPaidLeaves,
-        salary.breakdown.basic.toFixed(2),
-        salary.breakdown.conveyance.toFixed(2),
-        salary.breakdown.hra.toFixed(2),
-        salary.breakdown.specialAllowance.toFixed(2),
-        salary.breakdown.otherAllowance.toFixed(2),
-        salary.grossSalary.toFixed(2),
-        salary.breakdown.pf.toFixed(2),
-        salary.breakdown.esi.toFixed(2),
-        salary.breakdown.pTax.toFixed(2),
-        salary.deductions.toFixed(2),
-        salary.netSalary,
-      ],
-    ];
+    const rows = [columnDefs.map((col) => col.getValue(salary))];
 
     autoTable(doc, {
       startY: startY,
@@ -781,9 +963,8 @@ export const generateSalaryByMonth = async (officeId, month, year) => {
       body: rows,
       theme: 'grid',
       didDrawPage: (data) => {
-        // For official use only
         doc.setFontSize(8);
-        const officeUseText = `For ${salary.office.name}`;
+        const officeUseText = `For ${salary.office?.name || ''}`;
         const officeTextWidth = doc.getTextWidth(officeUseText);
         doc.text(officeUseText, pageWidth - data.settings.margin.right - officeTextWidth, data.cursor.y + 15);
 
@@ -796,7 +977,6 @@ export const generateSalaryByMonth = async (officeId, month, year) => {
           data.cursor.y + 25
         );
 
-        // Page footer
         if (!footerPrinted) {
           doc.setFontSize(10);
           doc.text(`Page ${doc.internal.getNumberOfPages()}`, data.settings.margin.left, pageHeight - 10);
@@ -809,13 +989,299 @@ export const generateSalaryByMonth = async (officeId, month, year) => {
       },
     });
 
-    // Increment rowIndex for the next salary
     rowIndex++;
-    startY = doc.lastAutoTable.finalY + 50; // Adjust spacing between tables
+    startY = doc.lastAutoTable.finalY + 50;
   }
 
-  // Return the PDF buffer
   return doc.output('arraybuffer');
+};
+
+const thinBorder = {
+  top: { style: 'thin' },
+  left: { style: 'thin' },
+  bottom: { style: 'thin' },
+  right: { style: 'thin' },
+};
+const round2 = (v) => Math.round((Number(v) || 0) * 100) / 100;
+
+export const generateSalaryExcelByMonth = async (officeId, month, year) => {
+  const [salaries, salaryStructure, office] = await Promise.all([
+    Salary.find({ office: officeId, month, year }).populate('staff', 'fullName pfNo esiNo').lean(),
+    SalaryStructure.findOne({ office: officeId }).lean(),
+    Office.findById(officeId).lean(),
+  ]);
+
+  if (!salaries.length) {
+    throw new ApiError(404, 'Not Found!', 'No salaries found for the given month.');
+  }
+  if (!salaryStructure) {
+    throw new ApiError(404, 'Not Found!', 'Salary configuration not found for this office.');
+  }
+
+  // ================================================================
+  // Column order matches the office's printed salary sheet:
+  // SL NO, NAME, RATE, NOD, BASIC, HRA, SPL ALLOWANCE, GROSS, CONV,
+  // TOTAL GROSS, PF, ESI, P TAX, L.W.F, LESS ADVANCE, TD, NET.
+  // `sum: true` marks columns that get a SUM() formula in the TOTAL row.
+  // ================================================================
+  const columnDefs = [
+    { header: 'SL NO', key: 'slNo', width: 8 },
+    { header: 'NAME', key: 'name', width: 24 },
+    { header: 'RATE', key: 'rate', width: 10 }, // never summed — shows "." in TOTAL row
+    { header: 'NOD', key: 'nod', width: 8, sum: true },
+    { header: 'BASIC', key: 'basic', width: 10, sum: true },
+  ];
+
+  if (salaryStructure.hra?.enabled) {
+    columnDefs.push({ header: 'HRA', key: 'hra', width: 10, sum: true });
+  }
+  if (salaryStructure.specialAllowance?.enabled) {
+    columnDefs.push({ header: 'SPL ALLOWANCE', key: 'splAllowance', width: 14, sum: true });
+  }
+  if (salaryStructure.otherAllowance?.enabled) {
+    columnDefs.push({ header: 'OTHER ALLOW', key: 'otherAllowance', width: 12, sum: true });
+  }
+
+  columnDefs.push({ header: 'GROSS', key: 'gross', width: 10, sum: true });
+
+  if (salaryStructure.conveyance?.enabled) {
+    columnDefs.push({ header: 'CONV', key: 'conv', width: 9, sum: true });
+  }
+
+  columnDefs.push({ header: 'TOTAL GROSS', key: 'totalGross', width: 13, sum: true });
+
+  if (salaryStructure.pf?.enabled) {
+    columnDefs.push({ header: 'PF', key: 'pf', width: 9, sum: true });
+  }
+  if (salaryStructure.esi?.enabled) {
+    columnDefs.push({ header: 'ESI', key: 'esi', width: 9, sum: true });
+  }
+  if (salaryStructure.pTax?.enabled) {
+    columnDefs.push({ header: 'P TAX', key: 'pTax', width: 9, sum: true });
+  }
+
+  // L.W.F — no schema/calc support yet. Always rendered as 0 to keep
+  // the fixed sheet layout, until LWF is added end-to-end (schema +
+  // autoCalculateAllSalaryByMonth), same as noted for the PDF export.
+  columnDefs.push({ header: 'L.W.F', key: 'lwf', width: 9, sum: true });
+
+  columnDefs.push({ header: 'LESS ADVANCE', key: 'lessAdvance', width: 13, sum: true });
+  columnDefs.push({ header: 'TD', key: 'td', width: 10, sum: true }); // = Salary.deductions (PF+ESI+PTax+Advance)
+  columnDefs.push({ header: 'NET', key: 'net', width: 11, sum: true });
+
+  const workbook = new ExcelJS.Workbook();
+  const sheet = workbook.addWorksheet('Salary Sheet');
+  const colCount = columnDefs.length;
+
+  columnDefs.forEach((col, idx) => {
+    sheet.getColumn(idx + 1).width = col.width;
+  });
+
+  // ---------- Row 1: Company name ----------
+  sheet.mergeCells(1, 1, 1, colCount);
+  const titleCell = sheet.getCell(1, 1);
+  titleCell.value = office?.name?.toUpperCase() || 'COMPANY NAME';
+  titleCell.font = { bold: true, size: 13 }; // was 16
+  titleCell.alignment = { horizontal: 'center', vertical: 'middle' };
+  titleCell.fill = { type: 'pattern', pattern: 'solid', fgColor: { argb: 'FFB39DDB' } };
+  sheet.getRow(1).height = 20;
+
+  // ---------- Row 2: Subtitle ----------
+  sheet.mergeCells(2, 1, 2, colCount);
+  const subtitleCell = sheet.getCell(2, 1);
+  const monthLabel = format(new Date(year, month - 1), 'MMMM').toUpperCase();
+  subtitleCell.value = `SALARY SHEET ${monthLabel}'${String(year).slice(-2)}`;
+  subtitleCell.font = { bold: true, size: 10, color: { argb: 'FFFFFFFF' } }; // was 12
+  subtitleCell.alignment = { horizontal: 'center', vertical: 'middle' };
+  subtitleCell.fill = { type: 'pattern', pattern: 'solid', fgColor: { argb: 'FF2E86AB' } };
+  sheet.getRow(2).height = 16; // was 20
+
+  // ---------- Row 3: Header ----------
+  const headerRow = sheet.getRow(3);
+  columnDefs.forEach((col, idx) => {
+    const cell = headerRow.getCell(idx + 1);
+    cell.value = col.header;
+    cell.font = { bold: true, size: 9, color: { argb: 'FFFFFFFF' } }; // added size: 9
+    cell.alignment = { horizontal: 'center', vertical: 'middle', wrapText: true };
+    cell.fill = { type: 'pattern', pattern: 'solid', fgColor: { argb: 'FF2E86AB' } };
+    cell.border = thinBorder;
+  });
+  headerRow.height = 24; // was 30
+
+  // ---------- Data rows ----------
+  const firstDataRow = 4;
+  let rowIndex = firstDataRow;
+
+  salaries.forEach((s, i) => {
+    const gross =
+      (s.breakdown?.basic ?? 0) +
+      (s.breakdown?.da ?? 0) +
+      (s.breakdown?.hra ?? 0) +
+      (s.breakdown?.otherAllowance ?? 0) +
+      (s.breakdown?.specialAllowance ?? 0);
+
+    const rowData = {
+      slNo: i + 1,
+      name: s.staff?.fullName || '-',
+      rate: s.baseSalary,
+      nod: (s.attendanceDetails?.totalFullDays ?? 0) + (s.attendanceDetails?.totalHalfDays ?? 0),
+      basic: round2(s.breakdown?.basic),
+      hra: round2(s.breakdown?.hra),
+      splAllowance: round2(s.breakdown?.specialAllowance),
+      otherAllowance: round2(s.breakdown?.otherAllowance),
+      gross: round2(gross),
+      conv: round2(s.breakdown?.conveyance),
+      totalGross: round2(s.grossSalary),
+      pf: round2(s.breakdown?.pf),
+      esi: round2(s.breakdown?.esi),
+      pTax: round2(s.breakdown?.pTax),
+      lwf: 0,
+      lessAdvance: round2(s.breakdown?.advanceDeduction),
+      td: round2(s.deductions),
+      net: s.netSalary,
+    };
+
+    const row = sheet.getRow(rowIndex);
+    columnDefs.forEach((col, idx) => {
+      const cell = row.getCell(idx + 1);
+      cell.value = rowData[col.key];
+      cell.font = { size: 9 };
+      cell.border = thinBorder;
+      cell.alignment = { horizontal: col.key === 'name' ? 'left' : 'center' };
+    });
+    rowIndex++;
+  });
+
+  const lastDataRow = rowIndex - 1;
+
+  // ---------- TOTAL row ----------
+  const totalRow = sheet.getRow(rowIndex);
+  sheet.mergeCells(rowIndex, 1, rowIndex, 2);
+
+  const totalLabelCell = totalRow.getCell(1);
+  totalLabelCell.value = 'TOTAL';
+  totalLabelCell.font = { bold: true, color: { argb: 'FFFFFFFF' } };
+  totalLabelCell.alignment = { horizontal: 'center', vertical: 'middle' };
+  totalLabelCell.fill = { type: 'pattern', pattern: 'solid', fgColor: { argb: 'FF2E86AB' } };
+  totalLabelCell.border = thinBorder;
+
+  columnDefs.forEach((col, idx) => {
+    if (idx < 2) return;
+    const cell = totalRow.getCell(idx + 1);
+    const colLetter = sheet.getColumn(idx + 1).letter;
+
+    if (col.sum) {
+      cell.value = { formula: `SUM(${colLetter}${firstDataRow}:${colLetter}${lastDataRow})` };
+    } else {
+      cell.value = col.key === 'rate' ? '.' : '';
+    }
+    cell.font = { bold: true, size: 9, color: { argb: 'FFFFFFFF' } }; // added size: 9
+    cell.alignment = { horizontal: 'center' };
+    cell.fill = { type: 'pattern', pattern: 'solid', fgColor: { argb: 'FF2E86AB' } };
+    cell.border = thinBorder;
+  });
+  totalRow.height = 18;
+
+  return workbook.xlsx.writeBuffer();
+};
+
+export const getSalaryTableByMonth = async (officeId, month, year) => {
+  const [salaries, salaryStructure] = await Promise.all([
+    Salary.find({ office: officeId, month, year }).populate('staff', 'fullName pfNo esiNo').lean(),
+    SalaryStructure.findOne({ office: officeId }).lean(),
+  ]);
+
+  if (!salaries.length) {
+    throw new ApiError(404, 'Not Found!', 'No salaries found for the given month.');
+  }
+  if (!salaryStructure) {
+    throw new ApiError(404, 'Not Found!', 'Salary configuration not found for this office.');
+  }
+
+  // Same conditional column shape as the Excel export, but returns
+  // plain JSON so the frontend can render a preview table before the
+  // user commits to downloading the .xlsx file.
+  const columnDefs = [
+    { header: 'SL NO', key: 'slNo', summable: false },
+    { header: 'NAME', key: 'name', summable: false },
+    { header: 'RATE', key: 'rate', summable: false },
+    { header: 'NOD', key: 'nod', summable: true },
+    { header: 'BASIC', key: 'basic', summable: true },
+  ];
+
+  if (salaryStructure.hra?.enabled) {
+    columnDefs.push({ header: 'HRA', key: 'hra', summable: true });
+  }
+  if (salaryStructure.specialAllowance?.enabled) {
+    columnDefs.push({ header: 'SPL ALLOWANCE', key: 'splAllowance', summable: true });
+  }
+  if (salaryStructure.otherAllowance?.enabled) {
+    columnDefs.push({ header: 'OTHER ALLOW', key: 'otherAllowance', summable: true });
+  }
+
+  columnDefs.push({ header: 'GROSS', key: 'gross', summable: true });
+
+  if (salaryStructure.conveyance?.enabled) {
+    columnDefs.push({ header: 'CONV', key: 'conv', summable: true });
+  }
+
+  columnDefs.push({ header: 'TOTAL GROSS', key: 'totalGross', summable: true });
+
+  if (salaryStructure.pf?.enabled) {
+    columnDefs.push({ header: 'PF', key: 'pf', summable: true });
+  }
+  if (salaryStructure.esi?.enabled) {
+    columnDefs.push({ header: 'ESI', key: 'esi', summable: true });
+  }
+  if (salaryStructure.pTax?.enabled) {
+    columnDefs.push({ header: 'P TAX', key: 'pTax', summable: true });
+  }
+
+  columnDefs.push({ header: 'L.W.F', key: 'lwf', summable: true });
+  columnDefs.push({ header: 'LESS ADVANCE', key: 'lessAdvance', summable: true });
+  columnDefs.push({ header: 'TD', key: 'td', summable: true });
+  columnDefs.push({ header: 'NET', key: 'net', summable: true });
+
+  const rows = salaries.map((s, i) => {
+    const gross =
+      (s.breakdown?.basic ?? 0) +
+      (s.breakdown?.da ?? 0) +
+      (s.breakdown?.hra ?? 0) +
+      (s.breakdown?.otherAllowance ?? 0) +
+      (s.breakdown?.specialAllowance ?? 0);
+
+    return {
+      slNo: i + 1,
+      name: s.staff?.fullName || '-',
+      rate: s.baseSalary,
+      nod: (s.attendanceDetails?.totalFullDays ?? 0) + (s.attendanceDetails?.totalHalfDays ?? 0),
+      basic: round2(s.breakdown?.basic),
+      hra: round2(s.breakdown?.hra),
+      splAllowance: round2(s.breakdown?.specialAllowance),
+      otherAllowance: round2(s.breakdown?.otherAllowance),
+      gross: round2(gross),
+      conv: round2(s.breakdown?.conveyance),
+      totalGross: round2(s.grossSalary),
+      pf: round2(s.breakdown?.pf),
+      esi: round2(s.breakdown?.esi),
+      pTax: round2(s.breakdown?.pTax),
+      lwf: 0,
+      lessAdvance: round2(s.breakdown?.advanceDeduction),
+      td: round2(s.deductions),
+      net: s.netSalary,
+    };
+  });
+
+  // Compute totals for every summable column so the frontend preview
+  // shows the exact same TOTAL row the Excel file will contain.
+  const totals = columnDefs.reduce((acc, col) => {
+    if (col.summable) {
+      acc[col.key] = rows.reduce((sum, r) => sum + (Number(r[col.key]) || 0), 0);
+    }
+    return acc;
+  }, {});
+
+  return { columns: columnDefs, rows, totals };
 };
 
 async function creditHolidayLeavesFund(office, month, year, staff, amount) {
@@ -839,3 +1305,33 @@ async function creditHolidayLeavesFund(office, month, year, staff, amount) {
     logger.error('Error while crediting holiday leaves fund:', error);
   }
 }
+
+// Update Conveynance allowance
+export const updateManualConveyanceForSalary = async (officeId, salaryId, conveyanceAmount) => {
+  const salaryStructure = await SalaryStructure.findOne({ office: officeId });
+  if (!salaryStructure) throw new ApiError(404, 'Not Found!', 'Salary configuration not found for this office.');
+
+  if (!salaryStructure.conveyance?.enabled || salaryStructure.conveyance?.mode !== 'input') {
+    throw new ApiError(
+      400,
+      'Bad Request',
+      'Manual conveyance can only be set when Conveyance is enabled with mode "input" in Salary Structure settings.'
+    );
+  }
+
+  const salary = await Salary.findOne({ _id: salaryId, office: officeId });
+  if (!salary) throw new ApiError(404, 'Not Found!', 'Salary record not found for this office.');
+
+  const updatedSalary = await Salary.findOneAndUpdate(
+    { _id: salaryId, office: officeId },
+    {
+      $set: {
+        manualConveyance: conveyanceAmount,
+        'breakdown.conveyance': conveyanceAmount,
+      },
+    },
+    { new: true }
+  ).populate('staff', 'fullName staffId');
+
+  return updatedSalary;
+};

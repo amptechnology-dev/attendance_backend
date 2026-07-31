@@ -2,7 +2,14 @@ import expressAsyncHandler from 'express-async-handler';
 import { ApiResponse, ApiError } from '../utils/responseHandler.js';
 import { SalaryStructure, Salary } from '../models/salary.model.js';
 import { autoCalculateAllSalary } from '../services/salary.service.js';
-import { saveAdvanceSalary, generateSalaryPdf, generateSalaryByMonth } from '../services/salary.service.js';
+import {
+  saveAdvanceSalary,
+  generateSalaryPdf,
+  generateSalaryByMonth,
+  generateSalaryExcelByMonth,
+  getSalaryTableByMonth,
+  updateManualConveyanceForSalary,
+} from '../services/salary.service.js';
 import { AdvanceTransaction } from '../models/salary.model.js';
 import { HolidayFund } from '../models/holidayFund.model.js';
 import { Office } from '../models/office.model.js';
@@ -10,11 +17,53 @@ import { getCurrentDate } from '../utils/dateTime.utils.js';
 import { startOfMonth, subMonths } from 'date-fns';
 
 export const putSalaryStructure = expressAsyncHandler(async (req, res) => {
-  const updatedSalaryStructure = await SalaryStructure.findOneAndUpdate({ office: req.admin.office }, req.body, {
-    upsert: true,
-    new: true,
-  });
-  return new ApiResponse(200, updatedSalaryStructure, 'Salary structure updated successfully.').send(res);
+  const { grossSalary, basicSalary, da, otherAllowance, hra, conveyance, specialAllowance, pf, esi, pTax, bonus_rate } =
+    req.body;
+
+  // ---- Minimal but important validation (avoids garbage % values reaching payroll calc) ----
+  const pctFields = [
+    ['basicSalary.percentage', basicSalary?.percentage],
+    ['da.percentage', da?.percentage],
+    ['otherAllowance.percentage', otherAllowance?.percentage],
+    ['hra.percentage', hra?.percentage],
+    ['conveyance.percentage', conveyance?.percentage],
+  ];
+  for (const [label, value] of pctFields) {
+    if (value !== undefined && (value < 0 || value > 100)) {
+      return new ApiResponse(400, null, `${label} must be between 0 and 100.`).send(res);
+    }
+  }
+
+  if (hra?.enabled && !['basic', 'gross', 'basicPlusDa'].includes(hra.calculateOn)) {
+    return new ApiResponse(400, null, 'Invalid hra.calculateOn value.').send(res);
+  }
+  if (conveyance?.enabled && !['input', 'readonly'].includes(conveyance.mode)) {
+    return new ApiResponse(400, null, 'Invalid conveyance.mode value.').send(res);
+  }
+  if (pf?.enabled && !['basic', 'basicPlusDa'].includes(pf.calculateOn)) {
+    return new ApiResponse(400, null, 'Invalid pf.calculateOn value.').send(res);
+  }
+
+  const updatedSalaryStructure = await SalaryStructure.findOneAndUpdate(
+    { office: req.admin.office },
+    {
+      office: req.admin.office,
+      grossSalary,
+      basicSalary,
+      da,
+      otherAllowance,
+      hra,
+      conveyance,
+      specialAllowance,
+      pf,
+      esi,
+      pTax,
+      bonus_rate,
+    },
+    { upsert: true, new: true, runValidators: true, setDefaultsOnInsert: true }
+  );
+
+  return new ApiResponse(200, updatedSalaryStructure, 'Salary structure saved successfully.').send(res);
 });
 
 export const addAdvanceSalary = expressAsyncHandler(async (req, res) => {
@@ -53,7 +102,14 @@ export const getSalaryStructure = expressAsyncHandler(async (req, res) => {
 
 export const autoCalculateAllSalaryByMonth = expressAsyncHandler(async (req, res) => {
   const { month, year } = req.body;
-  const data = await autoCalculateAllSalary(req.admin.office, month, year);
+
+  const data = await autoCalculateAllSalary(
+    req.admin.office,
+    month,
+    year,
+    req.admin._id
+  );
+
   return new ApiResponse(200, data, 'Salary calculated successfully.').send(res);
 });
 
@@ -85,11 +141,15 @@ export const getPreviousMonthSalary = expressAsyncHandler(async (req, res) => {
   const previousMonthDate = subMonths(startOfMonth(now), 1);
   const previousMonthNumber = previousMonthDate.getMonth() + 1; // getMonth is 0-based
   const previousMonthYear = previousMonthDate.getFullYear();
+
   const data = await Salary.find({
     office: req.admin.office,
     month: previousMonthNumber,
     year: previousMonthYear,
-  }).populate('staff', 'fullName staffId');
+  })
+    .populate('staff', 'fullName staffId')
+    .lean(); // <-- prevents Mongoose from re-injecting schema defaults for $unset breakdown fields
+
   data.sort((a, b) => (a.staff?.fullName || '').localeCompare(b.staff?.fullName || ''));
 
   return new ApiResponse(200, data, 'Previous month salary fetched successfully.').send(res);
@@ -108,6 +168,9 @@ export const getPastMonthSalary = expressAsyncHandler(async (req, res) => {
   const targetYear = targetDate.getFullYear();
   const targetMonth = targetDate.getMonth() + 1;
 
+  // NOTE: aggregate() already returns plain JS objects (no Mongoose hydration),
+  // so schema defaults are never auto-injected here. No .lean() needed/possible
+  // on an aggregate pipeline — this function was never affected by the bug.
   const data = await Salary.aggregate([
     { $match: { office: req.admin.office } },
     {
@@ -160,6 +223,22 @@ export const getSalaryPdfByMonth = expressAsyncHandler(async (req, res) => {
   res.send(Buffer.from(pdfBuffer));
 });
 
+export const getSalaryExcelByMonth = expressAsyncHandler(async (req, res) => {
+  const { month, year } = req.body;
+
+  const excelBuffer = await generateSalaryExcelByMonth(req.admin.office, parseInt(month), parseInt(year));
+
+  res.setHeader('Content-Type', 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet');
+  res.setHeader('Content-Disposition', `attachment; filename="salary_sheet_${month}_${year}.xlsx"`);
+  res.send(Buffer.from(excelBuffer));
+});
+
+export const getSalaryTablesByMonth = expressAsyncHandler(async (req, res) => {
+  const { month, year } = req.body;
+  const data = await getSalaryTableByMonth(req.admin.office, parseInt(month), parseInt(year));
+  return new ApiResponse(200, data, 'Salary table fetched successfully.').send(res);
+});
+
 export const getAdvanceSalaryTransactions = expressAsyncHandler(async (req, res) => {
   const data = await AdvanceTransaction.find({ office: req.admin.office })
     .populate('staff', 'fullName staffId')
@@ -179,4 +258,20 @@ export const getHolidayFundTransactions = expressAsyncHandler(async (req, res) =
     { holidayFundBalance, transaction },
     'Holiday fund transactions fetched successfully.'
   ).send(res);
+});
+
+// Update manual conveynance
+export const updateManualConveyance = expressAsyncHandler(async (req, res) => {
+  const { salaryId } = req.params;
+  const { amount } = req.body;
+
+  if (amount === undefined || isNaN(amount) || amount < 0) {
+    throw new ApiError(400, 'Bad Request', 'A valid non-negative conveyance amount is required.');
+  }
+
+  const updatedSalary = await updateManualConveyanceForSalary(req.admin.office, salaryId, Number(amount));
+
+  return new ApiResponse(200, updatedSalary, 'Conveyance updated and salary breakdown recalculated successfully.').send(
+    res
+  );
 });

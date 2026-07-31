@@ -1,5 +1,5 @@
 import { Attendance } from '../models/attendance.model.js';
-import { Salary } from '../models/salary.model.js';
+import { Salary ,SalaryStructure} from '../models/salary.model.js';
 import { jsPDF } from 'jspdf';
 import autoTable from 'jspdf-autotable';
 import { format, startOfYear, endOfYear } from 'date-fns';
@@ -1200,69 +1200,150 @@ export const generatePerformanceReportPDF = async (officeName, data, filters) =>
 };
 
 export const generateMonthlySalaryReport = async (office, month, year) => {
-  const report = await Salary.aggregate([
-    {
-      $match: {
-        office,
-        month: Number(month),
-        year: Number(year),
-      },
-    },
-    {
-      $lookup: {
-        from: 'staffs',
-        localField: 'staff',
-        foreignField: '_id',
-        as: 'staffDetails',
-      },
-    },
-    { $unwind: '$staffDetails' },
-    {
-      $lookup: {
-        from: 'departments',
-        localField: 'staffDetails.department',
-        foreignField: '_id',
-        as: 'departmentDetails',
-      },
-    },
-    { $unwind: '$departmentDetails' },
-    {
-      $group: {
-        _id: '$departmentDetails._id',
-        departmentName: { $first: '$departmentDetails.name' },
-        staffs: {
-          $push: {
-            fullName: '$staffDetails.fullName',
-            staffId: '$staffDetails.staffId',
-            pfNo: '$staffDetails.pfNo',
-            esiNo: '$staffDetails.esiNo',
-            totalPayableDays: '$totalPayableDays',
-            breakdown: '$breakdown',
-            deductions: '$deductions',
-            grossSalary: '$grossSalary',
-            netSalary: '$netSalary',
-            advanceDeduction: '$breakdown.advanceDeduction',
-          },
+  const [report, salaryStructure, officeDoc] = await Promise.all([
+    Salary.aggregate([
+      {
+        $match: {
+          office,
+          month: Number(month),
+          year: Number(year),
         },
-        totalGrossSalary: { $sum: '$grossSalary' },
-        totalNetSalary: { $sum: '$netSalary' },
-        totalPfDeduction: { $sum: '$breakdown.pf' },
-        totalEsiDeduction: { $sum: '$breakdown.esi' },
-        totalPTaxDeduction: { $sum: '$breakdown.pTax' },
-        totalAdvanceDeduction: { $sum: '$breakdown.advanceDeduction' },
-        totalDeductions: { $sum: '$deductions' },
       },
-    },
-    { $sort: { departmentName: 1, 'staffs.fullName': 1 } },
+      {
+        $lookup: {
+          from: 'staffs',
+          localField: 'staff',
+          foreignField: '_id',
+          as: 'staffDetails',
+        },
+      },
+      { $unwind: '$staffDetails' },
+      {
+        $lookup: {
+          from: 'departments',
+          localField: 'staffDetails.department',
+          foreignField: '_id',
+          as: 'departmentDetails',
+        },
+      },
+      { $unwind: '$departmentDetails' },
+      {
+        $group: {
+          _id: '$departmentDetails._id',
+          departmentName: { $first: '$departmentDetails.name' },
+          staffs: {
+            $push: {
+              fullName: '$staffDetails.fullName',
+              staffId: '$staffDetails.staffId',
+              pfNo: '$staffDetails.pfNo',
+              esiNo: '$staffDetails.esiNo',
+              totalPayableDays: '$totalPayableDays',
+              breakdown: '$breakdown',
+              deductions: '$deductions',
+              grossSalary: '$grossSalary',
+              netSalary: '$netSalary',
+              advanceDeduction: '$breakdown.advanceDeduction',
+            },
+          },
+          totalGrossSalary: { $sum: '$grossSalary' },
+          totalNetSalary: { $sum: '$netSalary' },
+          totalBasic: { $sum: '$breakdown.basic' },
+          totalDa: { $sum: '$breakdown.da' },
+          totalHra: { $sum: '$breakdown.hra' },
+          totalConveyance: { $sum: '$breakdown.conveyance' },
+          totalSpecialAllowance: { $sum: '$breakdown.specialAllowance' },
+          totalPfDeduction: { $sum: '$breakdown.pf' },
+          totalEsiDeduction: { $sum: '$breakdown.esi' },
+          totalPTaxDeduction: { $sum: '$breakdown.pTax' },
+          totalAdvanceDeduction: { $sum: '$breakdown.advanceDeduction' },
+          totalDeductions: { $sum: '$deductions' },
+        },
+      },
+      { $sort: { departmentName: 1, 'staffs.fullName': 1 } },
+    ]),
+    SalaryStructure.findOne({ office }).lean(),
+    Office.findOne({ _id: office }).select('name'),
   ]);
+
   // Generate PDF
   if (!report || report.length === 0) return;
+  if (!salaryStructure) {
+    throw new ApiError(404, 'Not Found!', 'Salary configuration not found for this office.');
+  }
+
+  const officeName = officeDoc?.name;
+
+  // ================================================================
+  // Build column definitions dynamically based on which components
+  // are enabled in this office's Salary Structure settings.
+  // Each def carries: header label, per-staff value getter, and the
+  // matching department-total getter — so header/row/totals can
+  // never drift out of alignment.
+  // ================================================================
+  const columnDefs = [
+    {
+      header: 'Staff',
+      getValue: (s) => `${s.fullName}\n\n${s.pfNo ? `PF: ${s.pfNo}` : ''}\n${s.esiNo ? `ESI: ${s.esiNo}` : ''}`,
+      getTotal: null, // covered by colSpan in totals row
+    },
+    { header: 'WD', getValue: (s) => s.totalPayableDays, getTotal: null },
+    { header: 'Basic', getValue: (s) => s.breakdown?.basic ?? 0, getTotal: (d) => d.totalBasic },
+  ];
+
+  if (salaryStructure.da?.enabled) {
+    columnDefs.push({ header: 'DA', getValue: (s) => s.breakdown?.da ?? 0, getTotal: (d) => d.totalDa });
+  }
+  if (salaryStructure.hra?.enabled) {
+    columnDefs.push({ header: 'HRA', getValue: (s) => s.breakdown?.hra ?? 0, getTotal: (d) => d.totalHra });
+  }
+  if (salaryStructure.conveyance?.enabled) {
+    columnDefs.push({
+      header: 'Conv A',
+      getValue: (s) => s.breakdown?.conveyance ?? 0,
+      getTotal: (d) => d.totalConveyance,
+    });
+  }
+  if (salaryStructure.specialAllowance?.enabled) {
+    columnDefs.push({
+      header: 'Spcl Allow',
+      getValue: (s) => s.breakdown?.specialAllowance ?? 0,
+      getTotal: (d) => d.totalSpecialAllowance,
+    });
+  }
+
+  columnDefs.push({ header: 'Gross', getValue: (s) => s.grossSalary, getTotal: (d) => d.totalGrossSalary });
+
+  if (salaryStructure.pf?.enabled) {
+    columnDefs.push({ header: 'PF', getValue: (s) => s.breakdown?.pf ?? 0, getTotal: (d) => d.totalPfDeduction });
+  }
+  if (salaryStructure.esi?.enabled) {
+    columnDefs.push({ header: 'ESI', getValue: (s) => s.breakdown?.esi ?? 0, getTotal: (d) => d.totalEsiDeduction });
+  }
+  if (salaryStructure.pTax?.enabled) {
+    columnDefs.push({
+      header: 'P.Tax',
+      getValue: (s) => s.breakdown?.pTax ?? 0,
+      getTotal: (d) => d.totalPTaxDeduction,
+    });
+  }
+
+  columnDefs.push({
+    header: 'Adv',
+    getValue: (s) => s.advanceDeduction ?? 0,
+    getTotal: (d) => d.totalAdvanceDeduction,
+  });
+  columnDefs.push({ header: 'Dedct', getValue: (s) => s.deductions, getTotal: (d) => d.totalDeductions });
+  columnDefs.push({ header: 'Net', getValue: (s) => s.netSalary, getTotal: (d) => d.totalNetSalary });
+  columnDefs.push({ header: 'Signature', getValue: () => '', getTotal: () => '' });
+
+  // Number of leading columns that get merged under "Total:" label
+  // (every column up to and including Gross has no meaningful per-dept total to show individually)
+  const totalLabelColSpan = columnDefs.findIndex((col) => col.header === 'Gross') + 1;
 
   const doc = new jsPDF({ format: 'a4', orientation: 'landscape' });
   const pageHeight = doc.internal.pageSize.height || doc.internal.pageSize.getHeight();
   const pageWidth = doc.internal.pageSize.width || doc.internal.pageSize.getWidth();
   const totalPagesExp = '{total_pages_count_string}';
-  const { name: officeName } = await Office.findOne({ _id: office }).select('name');
 
   const drawHeaderFooter = () => {
     // Title
@@ -1292,59 +1373,19 @@ export const generateMonthlySalaryReport = async (office, month, year) => {
     doc.setFontSize(12);
     doc.text(`Department: ${dept.departmentName} | Month: ${format(new Date(year, month - 1), 'MMMM, yyyy')}`, 10, 35);
 
-    // Table Header
-    const headers = [
-      [
-        'Staff',
-        'WD',
-        'Basic',
-        'HRA',
-        'Conv A',
-        'Otr A',
-        'Spcl Allow',
-        'Gross',
-        'PF',
-        'ESI',
-        'P.Tax',
-        'Adv',
-        'Dedct',
-        'Net',
-        'Signature',
-      ],
-    ];
-    // Table rows
-    const rows = dept.staffs.map((staff) => [
-      `${staff.fullName}\n\n${staff.pfNo ? `PF: ${staff.pfNo}` : ''}\n${staff.esiNo ? `ESI: ${staff.esiNo}` : ''}`,
-      staff.totalPayableDays,
-      staff.breakdown.basic,
-      staff.breakdown.hra,
-      staff.breakdown.conveyance,
-      staff.breakdown.otherAllowance,
-      staff.breakdown.specialAllowance,
-      staff.grossSalary,
-      staff.breakdown.pf,
-      staff.breakdown.esi,
-      staff.breakdown.pTax,
-      staff.advanceDeduction,
-      staff.deductions,
-      staff.netSalary,
-      '',
-    ]);
+    const headers = [columnDefs.map((col) => col.header)];
 
+    const rows = dept.staffs.map((staff) => columnDefs.map((col) => col.getValue(staff)));
+
+    // Totals row: first `totalLabelColSpan` columns merge under "Total:",
+    // remaining columns pull their sum from the matching getTotal().
     const totalsRow = [
       {
         content: 'Total:',
-        colSpan: 7,
+        colSpan: totalLabelColSpan,
         styles: { halign: 'right' },
       },
-      dept.totalGrossSalary,
-      dept.totalPfDeduction,
-      dept.totalEsiDeduction,
-      dept.totalPTaxDeduction,
-      dept.totalAdvanceDeduction,
-      dept.totalDeductions,
-      dept.totalNetSalary,
-      '',
+      ...columnDefs.slice(totalLabelColSpan).map((col) => (col.getTotal ? col.getTotal(dept) : '')),
     ];
 
     rows.push(totalsRow);
