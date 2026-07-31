@@ -241,7 +241,32 @@ const autoCalculateAllSalaryByMonth = async (officeId, month, year) => {
         // ---------- PTAX ----------
         const pTax = salaryStructure.pTax.enabled ? calculatePTax(grossSalary) : 0;
 
-        let totalDeductions = Math.round(esiDeduction + pfDeduction + pTax + leaveDeduction);
+        // ---------- LWF ----------
+
+        let lwfDeduction = 0;
+        if (salaryStructure.lwf.enabled) {
+          let lwfBase;
+          switch (salaryStructure.lwf.calculateOn) {
+            case 'basic':
+              lwfBase = basic;
+              break;
+            case 'basicPlusDa':
+              lwfBase = basic + da;
+              break;
+            case 'actualSalary':
+              lwfBase = baseSalary;
+              break;
+            case 'gross':
+            default:
+              lwfBase = grossSalary;
+              break;
+          }
+          if (lwfBase <= salaryStructure.lwf.wageCeiling) {
+            lwfDeduction = salaryStructure.lwf.fixedAmount;
+          }
+        }
+
+        let totalDeductions = Math.round(esiDeduction + pfDeduction + pTax + lwfDeduction + leaveDeduction);
         totalDeductions = Math.min(totalDeductions, grossSalary);
         let netSalary = Math.round(grossSalary - totalDeductions);
 
@@ -307,6 +332,9 @@ const autoCalculateAllSalaryByMonth = async (officeId, month, year) => {
         // PTax
         if (salaryStructure.pTax.enabled) setFields['breakdown.pTax'] = pTax;
         else unsetFields['breakdown.pTax'] = '';
+
+        if (salaryStructure.lwf.enabled) setFields['breakdown.lwf'] = lwfDeduction;
+        else unsetFields['breakdown.lwf'] = '';
 
         // Hourly pay — only persist if hourly-adjusted attendance actually occurred this month
         if (totalHourlyDays > 0) setFields['breakdown.hourlyPay'] = hourlyPay;
@@ -734,21 +762,18 @@ export const generateSalaryPdf = async (officeId, staffId, month, year) => {
   // ================================================================
   // Column order fixed to match the office's printed pay-slip format:
   // Name, Rate, W/D, BASIC, DA, HRA, SPL ALLOW, Other Allowance,
-  // Gross Wages, CONV, TOTAL GROSS, PF, ESI, P TAX, ADV., Net Amt.
+  // Gross Wages, CONV, TOTAL GROSS, PF, ESI, P TAX, LWF, ADV., TD, Net Amt.
   //
   // - Each optional column only renders when its toggle is enabled in
   //   Salary Structure settings; disabled ones never appear (not even
   //   as 0), so the printed layout matches whichever components this
   //   office actually uses.
-  // - "Other Allowance" occupies the slot that maps to the excel
-  //   template's LWF column — LWF has no schema/calc support yet, so
-  //   Other Allowance is what fills that position when enabled.
   // - ADV. is always shown: breakdown.advanceDeduction is a real
   //   schema field with `default: 0`, so it's read straight from the
   //   DB rather than conditionally hidden.
-  // - TD is omitted entirely: no field exists for it in either the
-  //   Salary or SalaryStructure schema, so there's nothing real to
-  //   show. Add it to both schemas first if you need this column.
+  // - TD = Total Deduction, backed by Salary.deductions (already sums
+  //   PF + ESI + PTax + LWF + leave deduction + advance deduction).
+  //   Always shown, same reasoning as ADV.
   // ================================================================
   const columnDefs = [
     { header: 'Name', getValue: (s) => s.staff?.fullName || '-' },
@@ -797,6 +822,9 @@ export const generateSalaryPdf = async (officeId, staffId, month, year) => {
   }
   if (salaryStructure.pTax?.enabled) {
     columnDefs.push({ header: 'P TAX', getValue: (s) => safeToFixed(s.breakdown?.pTax) });
+  }
+  if (salaryStructure.lwf?.enabled) {
+    columnDefs.push({ header: 'LWF', getValue: (s) => safeToFixed(s.breakdown?.lwf) });
   }
 
   // Always shown — real schema field with a default, not a toggle.
@@ -919,6 +947,9 @@ export const generateSalaryByMonth = async (officeId, month, year) => {
   }
   if (salaryStructure.pTax?.enabled) {
     columnDefs.push({ header: 'P TAX', getValue: (s) => safeToFixed(s.breakdown?.pTax) });
+  }
+  if (salaryStructure.lwf?.enabled) {
+    columnDefs.push({ header: 'LWF', getValue: (s) => safeToFixed(s.breakdown?.lwf) });
   }
 
   columnDefs.push({ header: 'ADV.', getValue: (s) => safeToFixed(s.breakdown?.advanceDeduction) });
@@ -1060,13 +1091,15 @@ export const generateSalaryExcelByMonth = async (officeId, month, year) => {
     columnDefs.push({ header: 'P TAX', key: 'pTax', width: 9, sum: true });
   }
 
-  // L.W.F — no schema/calc support yet. Always rendered as 0 to keep
-  // the fixed sheet layout, until LWF is added end-to-end (schema +
-  // autoCalculateAllSalaryByMonth), same as noted for the PDF export.
-  columnDefs.push({ header: 'L.W.F', key: 'lwf', width: 9, sum: true });
+  // L.W.F — now backed by SalaryStructure.lwf + breakdown.lwf. Only
+  // rendered when enabled, with the real calculated value (was
+  // previously always shown with a hardcoded 0 placeholder).
+  if (salaryStructure.lwf?.enabled) {
+    columnDefs.push({ header: 'L.W.F', key: 'lwf', width: 9, sum: true });
+  }
 
   columnDefs.push({ header: 'LESS ADVANCE', key: 'lessAdvance', width: 13, sum: true });
-  columnDefs.push({ header: 'TD', key: 'td', width: 10, sum: true }); // = Salary.deductions (PF+ESI+PTax+Advance)
+  columnDefs.push({ header: 'TD', key: 'td', width: 10, sum: true }); // = Salary.deductions (PF+ESI+PTax+LWF+Advance)
   columnDefs.push({ header: 'NET', key: 'net', width: 11, sum: true });
 
   const workbook = new ExcelJS.Workbook();
@@ -1081,7 +1114,7 @@ export const generateSalaryExcelByMonth = async (officeId, month, year) => {
   sheet.mergeCells(1, 1, 1, colCount);
   const titleCell = sheet.getCell(1, 1);
   titleCell.value = office?.name?.toUpperCase() || 'COMPANY NAME';
-  titleCell.font = { bold: true, size: 13 }; // was 16
+  titleCell.font = { bold: true, size: 13 };
   titleCell.alignment = { horizontal: 'center', vertical: 'middle' };
   titleCell.fill = { type: 'pattern', pattern: 'solid', fgColor: { argb: 'FFB39DDB' } };
   sheet.getRow(1).height = 20;
@@ -1091,22 +1124,22 @@ export const generateSalaryExcelByMonth = async (officeId, month, year) => {
   const subtitleCell = sheet.getCell(2, 1);
   const monthLabel = format(new Date(year, month - 1), 'MMMM').toUpperCase();
   subtitleCell.value = `SALARY SHEET ${monthLabel}'${String(year).slice(-2)}`;
-  subtitleCell.font = { bold: true, size: 10, color: { argb: 'FFFFFFFF' } }; // was 12
+  subtitleCell.font = { bold: true, size: 10, color: { argb: 'FFFFFFFF' } };
   subtitleCell.alignment = { horizontal: 'center', vertical: 'middle' };
   subtitleCell.fill = { type: 'pattern', pattern: 'solid', fgColor: { argb: 'FF2E86AB' } };
-  sheet.getRow(2).height = 16; // was 20
+  sheet.getRow(2).height = 16;
 
   // ---------- Row 3: Header ----------
   const headerRow = sheet.getRow(3);
   columnDefs.forEach((col, idx) => {
     const cell = headerRow.getCell(idx + 1);
     cell.value = col.header;
-    cell.font = { bold: true, size: 9, color: { argb: 'FFFFFFFF' } }; // added size: 9
+    cell.font = { bold: true, size: 9, color: { argb: 'FFFFFFFF' } };
     cell.alignment = { horizontal: 'center', vertical: 'middle', wrapText: true };
     cell.fill = { type: 'pattern', pattern: 'solid', fgColor: { argb: 'FF2E86AB' } };
     cell.border = thinBorder;
   });
-  headerRow.height = 24; // was 30
+  headerRow.height = 24;
 
   // ---------- Data rows ----------
   const firstDataRow = 4;
@@ -1135,7 +1168,7 @@ export const generateSalaryExcelByMonth = async (officeId, month, year) => {
       pf: round2(s.breakdown?.pf),
       esi: round2(s.breakdown?.esi),
       pTax: round2(s.breakdown?.pTax),
-      lwf: 0,
+      lwf: round2(s.breakdown?.lwf),
       lessAdvance: round2(s.breakdown?.advanceDeduction),
       td: round2(s.deductions),
       net: s.netSalary,
@@ -1175,7 +1208,7 @@ export const generateSalaryExcelByMonth = async (officeId, month, year) => {
     } else {
       cell.value = col.key === 'rate' ? '.' : '';
     }
-    cell.font = { bold: true, size: 9, color: { argb: 'FFFFFFFF' } }; // added size: 9
+    cell.font = { bold: true, size: 9, color: { argb: 'FFFFFFFF' } };
     cell.alignment = { horizontal: 'center' };
     cell.fill = { type: 'pattern', pattern: 'solid', fgColor: { argb: 'FF2E86AB' } };
     cell.border = thinBorder;
@@ -1236,8 +1269,10 @@ export const getSalaryTableByMonth = async (officeId, month, year) => {
   if (salaryStructure.pTax?.enabled) {
     columnDefs.push({ header: 'P TAX', key: 'pTax', summable: true });
   }
+  if (salaryStructure.lwf?.enabled) {
+    columnDefs.push({ header: 'L.W.F', key: 'lwf', summable: true });
+  }
 
-  columnDefs.push({ header: 'L.W.F', key: 'lwf', summable: true });
   columnDefs.push({ header: 'LESS ADVANCE', key: 'lessAdvance', summable: true });
   columnDefs.push({ header: 'TD', key: 'td', summable: true });
   columnDefs.push({ header: 'NET', key: 'net', summable: true });
@@ -1265,7 +1300,7 @@ export const getSalaryTableByMonth = async (officeId, month, year) => {
       pf: round2(s.breakdown?.pf),
       esi: round2(s.breakdown?.esi),
       pTax: round2(s.breakdown?.pTax),
-      lwf: 0,
+      lwf: round2(s.breakdown?.lwf),
       lessAdvance: round2(s.breakdown?.advanceDeduction),
       td: round2(s.deductions),
       net: s.netSalary,
@@ -1283,6 +1318,7 @@ export const getSalaryTableByMonth = async (officeId, month, year) => {
 
   return { columns: columnDefs, rows, totals };
 };
+
 
 async function creditHolidayLeavesFund(office, month, year, staff, amount) {
   try {

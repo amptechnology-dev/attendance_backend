@@ -1199,6 +1199,8 @@ export const generatePerformanceReportPDF = async (officeName, data, filters) =>
   return doc.output('arraybuffer');
 };
 
+const safeToFixed = (val) => (typeof val === 'number' ? val.toFixed(2) : (0).toFixed(2));
+
 export const generateMonthlySalaryReport = async (office, month, year) => {
   const [report, salaryStructure, officeDoc] = await Promise.all([
     Salary.aggregate([
@@ -1252,9 +1254,11 @@ export const generateMonthlySalaryReport = async (office, month, year) => {
           totalHra: { $sum: '$breakdown.hra' },
           totalConveyance: { $sum: '$breakdown.conveyance' },
           totalSpecialAllowance: { $sum: '$breakdown.specialAllowance' },
+          totalOtherAllowance: { $sum: '$breakdown.otherAllowance' },
           totalPfDeduction: { $sum: '$breakdown.pf' },
           totalEsiDeduction: { $sum: '$breakdown.esi' },
           totalPTaxDeduction: { $sum: '$breakdown.pTax' },
+          totalLwfDeduction: { $sum: '$breakdown.lwf' },
           totalAdvanceDeduction: { $sum: '$breakdown.advanceDeduction' },
           totalDeductions: { $sum: '$deductions' },
         },
@@ -1276,9 +1280,9 @@ export const generateMonthlySalaryReport = async (office, month, year) => {
   // ================================================================
   // Build column definitions dynamically based on which components
   // are enabled in this office's Salary Structure settings.
-  // Each def carries: header label, per-staff value getter, and the
-  // matching department-total getter — so header/row/totals can
-  // never drift out of alignment.
+  // Each def carries: header label, per-staff value getter (safe via
+  // safeToFixed), and the matching department-total getter — so
+  // header/row/totals can never drift out of alignment.
   // ================================================================
   const columnDefs = [
     {
@@ -1287,53 +1291,118 @@ export const generateMonthlySalaryReport = async (office, month, year) => {
       getTotal: null, // covered by colSpan in totals row
     },
     { header: 'WD', getValue: (s) => s.totalPayableDays, getTotal: null },
-    { header: 'Basic', getValue: (s) => s.breakdown?.basic ?? 0, getTotal: (d) => d.totalBasic },
+    { header: 'Basic', getValue: (s) => safeToFixed(s.breakdown?.basic), getTotal: (d) => safeToFixed(d.totalBasic) },
   ];
 
   if (salaryStructure.da?.enabled) {
-    columnDefs.push({ header: 'DA', getValue: (s) => s.breakdown?.da ?? 0, getTotal: (d) => d.totalDa });
+    columnDefs.push({
+      header: 'DA',
+      getValue: (s) => safeToFixed(s.breakdown?.da),
+      getTotal: (d) => safeToFixed(d.totalDa),
+    });
   }
   if (salaryStructure.hra?.enabled) {
-    columnDefs.push({ header: 'HRA', getValue: (s) => s.breakdown?.hra ?? 0, getTotal: (d) => d.totalHra });
-  }
-  if (salaryStructure.conveyance?.enabled) {
     columnDefs.push({
-      header: 'Conv A',
-      getValue: (s) => s.breakdown?.conveyance ?? 0,
-      getTotal: (d) => d.totalConveyance,
+      header: 'HRA',
+      getValue: (s) => safeToFixed(s.breakdown?.hra),
+      getTotal: (d) => safeToFixed(d.totalHra),
     });
   }
   if (salaryStructure.specialAllowance?.enabled) {
     columnDefs.push({
       header: 'Spcl Allow',
-      getValue: (s) => s.breakdown?.specialAllowance ?? 0,
-      getTotal: (d) => d.totalSpecialAllowance,
+      getValue: (s) => safeToFixed(s.breakdown?.specialAllowance),
+      getTotal: (d) => safeToFixed(d.totalSpecialAllowance),
+    });
+  }
+  if (salaryStructure.otherAllowance?.enabled) {
+    columnDefs.push({
+      header: 'Other Allow',
+      getValue: (s) => safeToFixed(s.breakdown?.otherAllowance),
+      getTotal: (d) => safeToFixed(d.totalOtherAllowance),
     });
   }
 
-  columnDefs.push({ header: 'Gross', getValue: (s) => s.grossSalary, getTotal: (d) => d.totalGrossSalary });
+  // Gross Wages = earnings before conveyance is folded in (matches payslip logic)
+  columnDefs.push({
+    header: 'Gross Wages',
+    getValue: (s) =>
+      safeToFixed(
+        (s.breakdown?.basic ?? 0) +
+          (s.breakdown?.da ?? 0) +
+          (s.breakdown?.hra ?? 0) +
+          (s.breakdown?.otherAllowance ?? 0) +
+          (s.breakdown?.specialAllowance ?? 0)
+      ),
+    getTotal: (d) =>
+      safeToFixed(
+        (d.totalBasic ?? 0) +
+          (d.totalDa ?? 0) +
+          (d.totalHra ?? 0) +
+          (d.totalOtherAllowance ?? 0) +
+          (d.totalSpecialAllowance ?? 0)
+      ),
+  });
 
-  if (salaryStructure.pf?.enabled) {
-    columnDefs.push({ header: 'PF', getValue: (s) => s.breakdown?.pf ?? 0, getTotal: (d) => d.totalPfDeduction });
-  }
-  if (salaryStructure.esi?.enabled) {
-    columnDefs.push({ header: 'ESI', getValue: (s) => s.breakdown?.esi ?? 0, getTotal: (d) => d.totalEsiDeduction });
-  }
-  if (salaryStructure.pTax?.enabled) {
+  if (salaryStructure.conveyance?.enabled) {
     columnDefs.push({
-      header: 'P.Tax',
-      getValue: (s) => s.breakdown?.pTax ?? 0,
-      getTotal: (d) => d.totalPTaxDeduction,
+      header: 'Conv A',
+      getValue: (s) => safeToFixed(s.breakdown?.conveyance),
+      getTotal: (d) => safeToFixed(d.totalConveyance),
     });
   }
 
   columnDefs.push({
-    header: 'Adv',
-    getValue: (s) => s.advanceDeduction ?? 0,
-    getTotal: (d) => d.totalAdvanceDeduction,
+    header: 'Gross',
+    getValue: (s) => safeToFixed(s.grossSalary),
+    getTotal: (d) => safeToFixed(d.totalGrossSalary),
   });
-  columnDefs.push({ header: 'Dedct', getValue: (s) => s.deductions, getTotal: (d) => d.totalDeductions });
-  columnDefs.push({ header: 'Net', getValue: (s) => s.netSalary, getTotal: (d) => d.totalNetSalary });
+
+  if (salaryStructure.pf?.enabled) {
+    columnDefs.push({
+      header: 'PF',
+      getValue: (s) => safeToFixed(s.breakdown?.pf),
+      getTotal: (d) => safeToFixed(d.totalPfDeduction),
+    });
+  }
+  if (salaryStructure.esi?.enabled) {
+    columnDefs.push({
+      header: 'ESI',
+      getValue: (s) => safeToFixed(s.breakdown?.esi),
+      getTotal: (d) => safeToFixed(d.totalEsiDeduction),
+    });
+  }
+  if (salaryStructure.pTax?.enabled) {
+    columnDefs.push({
+      header: 'P.Tax',
+      getValue: (s) => safeToFixed(s.breakdown?.pTax),
+      getTotal: (d) => safeToFixed(d.totalPTaxDeduction),
+    });
+  }
+  if (salaryStructure.lwf?.enabled) {
+    columnDefs.push({
+      header: 'LWF',
+      getValue: (s) => safeToFixed(s.breakdown?.lwf),
+      getTotal: (d) => safeToFixed(d.totalLwfDeduction),
+    });
+  }
+
+  // Always shown — real schema fields with defaults, not toggles.
+  columnDefs.push({
+    header: 'Adv',
+    getValue: (s) => safeToFixed(s.advanceDeduction),
+    getTotal: (d) => safeToFixed(d.totalAdvanceDeduction),
+  });
+  columnDefs.push({
+    header: 'Dedct',
+    getValue: (s) => safeToFixed(s.deductions),
+    getTotal: (d) => safeToFixed(d.totalDeductions),
+  });
+  columnDefs.push({
+    header: 'Net',
+    getValue: (s) => safeToFixed(s.netSalary),
+    getTotal: (d) => safeToFixed(d.totalNetSalary),
+  });
   columnDefs.push({ header: 'Signature', getValue: () => '', getTotal: () => '' });
 
   // Number of leading columns that get merged under "Total:" label
@@ -1359,8 +1428,19 @@ export const generateMonthlySalaryReport = async (office, month, year) => {
     doc.setLineWidth(0.2);
     doc.line(10, 27, pageWidth - 10, 27);
 
-    // FOOTER
+    // FOOTER — dashed separator + "For {office}" (matches payslip footer style)
     const currentPage = doc.internal.getCurrentPageInfo().pageNumber;
+
+    doc.setLineWidth(0.2);
+    doc.setLineDashPattern([2, 1]);
+    doc.line(10, pageHeight - 18, pageWidth - 10, pageHeight - 18);
+    doc.setLineDashPattern([]); // reset dash for subsequent draws
+
+    doc.setFontSize(8);
+    const officeUseText = `For ${officeName || ''}`;
+    const officeTextWidth = doc.getTextWidth(officeUseText);
+    doc.text(officeUseText, pageWidth - 10 - officeTextWidth, pageHeight - 14);
+
     doc.setFontSize(10);
     doc.setTextColor('gray');
     doc.text(`Page ${currentPage} of ${totalPagesExp}`, pageWidth - 40, pageHeight - 10);
@@ -1371,6 +1451,7 @@ export const generateMonthlySalaryReport = async (office, month, year) => {
     if (index > 0) doc.addPage();
 
     doc.setFontSize(12);
+    doc.setTextColor('black');
     doc.text(`Department: ${dept.departmentName} | Month: ${format(new Date(year, month - 1), 'MMMM, yyyy')}`, 10, 35);
 
     const headers = [columnDefs.map((col) => col.header)];

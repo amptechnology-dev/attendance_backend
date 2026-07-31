@@ -172,6 +172,37 @@ export const salaryStructureSchema = yup.object().shape({
     })
     .required(),
 
+  lwf: yup
+    .object()
+    .shape({
+      enabled: yup.boolean().default(false),
+      calculateOn: yup
+        .string()
+        .oneOf(['gross', 'basic', 'basicPlusDa', 'actualSalary'], 'Invalid LWF calculation base')
+        .when('enabled', {
+          is: true,
+          then: (schema) => schema.required('LWF calculation base is required when LWF is enabled'),
+          otherwise: (schema) => schema.notRequired(),
+        }),
+      wageCeiling: yup
+        .number()
+        .min(0)
+        .when('enabled', {
+          is: true,
+          then: (schema) => schema.required('LWF wage ceiling is required when LWF is enabled'),
+          otherwise: (schema) => schema.notRequired(),
+        }),
+      fixedAmount: yup
+        .number()
+        .min(0)
+        .when('enabled', {
+          is: true,
+          then: (schema) => schema.required('LWF fixed amount is required when LWF is enabled'),
+          otherwise: (schema) => schema.notRequired(),
+        }),
+    })
+    .required(),
+
   bonus_rate: yup.number().min(0).max(100).required('Bonus rate is required'),
 });
 

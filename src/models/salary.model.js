@@ -54,6 +54,7 @@ const SalarySchema = new mongoose.Schema(
       esi: { type: Number, default: 0 },
       pf: { type: Number, default: 0 },
       pTax: { type: Number, default: 0 },
+      lwf: { type: Number, default: 0 },
       hourlyPay: { type: Number, default: 0 },
       bonus: { type: Number, default: 0 },
       overtime: { type: Number, default: 0 },
@@ -145,7 +146,7 @@ const SalaryStructureShema = new mongoose.Schema(
 
     otherAllowance: {
       enabled: { type: Boolean, default: false },
-      percentage: { type: Number, default: 0, min: 0, max: 100 }, 
+      percentage: { type: Number, default: 0, min: 0, max: 100 },
     },
 
     pf: {
@@ -169,7 +170,18 @@ const SalaryStructureShema = new mongoose.Schema(
       enabled: { type: Boolean, default: false },
     },
 
-    bonus_rate: { type: Number, default: 8.33 }, // retained, still unused in calc (TODO from your original code)
+    lwf: {
+      enabled: { type: Boolean, default: false },
+      calculateOn: {
+        type: String,
+        enum: ['gross', 'basic', 'basicPlusDa', 'actualSalary'],
+        default: 'gross',
+      },
+      wageCeiling: { type: Number, default: 15000 }, 
+      fixedAmount: { type: Number, default: 25 }, 
+    },
+
+    bonus_rate: { type: Number, default: 8.33 }, 
   },
   { timestamps: true }
 );

@@ -17,8 +17,20 @@ import { getCurrentDate } from '../utils/dateTime.utils.js';
 import { startOfMonth, subMonths } from 'date-fns';
 
 export const putSalaryStructure = expressAsyncHandler(async (req, res) => {
-  const { grossSalary, basicSalary, da, otherAllowance, hra, conveyance, specialAllowance, pf, esi, pTax, bonus_rate } =
-    req.body;
+  const {
+    grossSalary,
+    basicSalary,
+    da,
+    otherAllowance,
+    hra,
+    conveyance,
+    specialAllowance,
+    pf,
+    esi,
+    pTax,
+    lwf,
+    bonus_rate,
+  } = req.body;
 
   // ---- Minimal but important validation (avoids garbage % values reaching payroll calc) ----
   const pctFields = [
@@ -43,6 +55,12 @@ export const putSalaryStructure = expressAsyncHandler(async (req, res) => {
   if (pf?.enabled && !['basic', 'basicPlusDa'].includes(pf.calculateOn)) {
     return new ApiResponse(400, null, 'Invalid pf.calculateOn value.').send(res);
   }
+  if (lwf?.enabled && !['gross', 'basic', 'basicPlusDa', 'actualSalary'].includes(lwf.calculateOn)) {
+    return new ApiResponse(400, null, 'Invalid lwf.calculateOn value.').send(res);
+  }
+  if (lwf?.enabled && (lwf.wageCeiling < 0 || lwf.fixedAmount < 0)) {
+    return new ApiResponse(400, null, 'lwf.wageCeiling and lwf.fixedAmount must be non-negative.').send(res);
+  }
 
   const updatedSalaryStructure = await SalaryStructure.findOneAndUpdate(
     { office: req.admin.office },
@@ -58,6 +76,7 @@ export const putSalaryStructure = expressAsyncHandler(async (req, res) => {
       pf,
       esi,
       pTax,
+      lwf,
       bonus_rate,
     },
     { upsert: true, new: true, runValidators: true, setDefaultsOnInsert: true }
