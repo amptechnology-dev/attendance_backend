@@ -60,6 +60,18 @@ const SalarySchema = new mongoose.Schema(
       overtime: { type: Number, default: 0 },
       advanceDeduction: { type: Number, default: 0 },
     },
+    totalPayableDays: {
+      type: Number, // Calculated: total days of month
+      required: true,
+    },
+    workedDays: {
+      type: Number, // display-only: totalFullDays + forgivenHalfDays + extraHalfDays*0.5 — excludes Week-Off
+      default: 0,
+    },
+    paidDays: {
+      type: Number, // Calculated: totalFullDays + forgiven-half-days - unpaid-extra-half-days
+      default: 0,
+    },
     deductions: {
       type: Number,
       default: 0, // Any additional deductions
@@ -109,8 +121,8 @@ const SalaryStructureShema = new mongoose.Schema(
     basicSalary: {
       calculationType: {
         type: String,
-        enum: ['perDay', 'fixed'],
-        default: 'fixed',
+        enum: ['onGross', 'onTotalSalary'],
+        default: 'onGross',
       },
       percentage: { type: Number, default: 50, min: 0, max: 100 },
     },
@@ -177,11 +189,11 @@ const SalaryStructureShema = new mongoose.Schema(
         enum: ['gross', 'basic', 'basicPlusDa', 'actualSalary'],
         default: 'gross',
       },
-      wageCeiling: { type: Number, default: 15000 }, 
-      fixedAmount: { type: Number, default: 25 }, 
+      wageCeiling: { type: Number, default: 15000 },
+      fixedAmount: { type: Number, default: 25 },
     },
 
-    bonus_rate: { type: Number, default: 8.33 }, 
+    bonus_rate: { type: Number, default: 8.33 },
   },
   { timestamps: true }
 );

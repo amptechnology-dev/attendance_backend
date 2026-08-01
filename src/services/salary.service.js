@@ -160,10 +160,12 @@ const autoCalculateAllSalaryByMonth = async (officeId, month, year) => {
         const totalUnpaidDays = totalUnpaidLeaves + holidayLeavesCount + unpaidHalfDays;
         const paidDays = daysInMonth - totalUnpaidDays;
 
+        const workedDays = totalFullDays + forgivenHalfDays + extraHalfDays * 0.5;
+
         const dailyRate = staff.monthlySalary / daysInMonth;
         const hourlyPay = totalHourPay * (dailyRate / dailyWorkHours);
         const overtimePay = overtimeHours * overtimeRate;
-        const bonus = 0; // TODO: bonus calculation
+        const bonus = 0;
 
         const baseSalary = staff.monthlySalary;
 
@@ -182,7 +184,7 @@ const autoCalculateAllSalaryByMonth = async (officeId, month, year) => {
 
         // ---------- BASIC SALARY ----------
         let basic;
-        if (salaryStructure.basicSalary.calculationType === 'perDay') {
+        if (salaryStructure.basicSalary.calculationType === 'onTotalSalary') {
           const basicDailyRate = ((salaryStructure.basicSalary.percentage / 100) * baseSalary) / daysInMonth;
           basic = basicDailyRate * paidDays;
         } else {
@@ -280,14 +282,12 @@ const autoCalculateAllSalaryByMonth = async (officeId, month, year) => {
 
         const unpaidHolidayLeaveDeduction = Math.min(holidayLeavesCount * dailyRate, grossSalary);
 
-        // ================================================================
-        // DYNAMIC FIELD INCLUSION — only push a breakdown key into $set if
-        // its corresponding settings toggle is enabled; otherwise $unset it
-        // so it never persists in the document (not even as 0).
-        // ================================================================
+       
         const setFields = {
           baseSalary,
           totalPayableDays: daysInMonth,
+          paidDays, 
+          workedDays, 
           attendanceDetails: { totalFullDays, totalHalfDays, totalHourPay, overtimeHours },
           leaves: {
             totalPaidLeaves,
@@ -778,7 +778,7 @@ export const generateSalaryPdf = async (officeId, staffId, month, year) => {
   const columnDefs = [
     { header: 'Name', getValue: (s) => s.staff?.fullName || '-' },
     { header: 'Rate', getValue: (s) => Math.round(s.baseSalary / s.totalPayableDays) },
-    { header: 'W/D', getValue: (s) => s.totalPayableDays },
+    { header: 'W/D', getValue: (s) => s.workedDays ?? 0 },
     { header: 'BASIC', getValue: (s) => safeToFixed(s.breakdown?.basic) },
   ];
 
@@ -901,10 +901,7 @@ export const generateSalaryByMonth = async (officeId, month, year) => {
   const columnDefs = [
     { header: 'Name', getValue: (s) => s.staff?.fullName || '-' },
     { header: 'Rate', getValue: (s) => s.baseSalary },
-    {
-      header: 'W/D',
-      getValue: (s) => s.attendanceDetails.totalFullDays + s.attendanceDetails.totalHalfDays,
-    },
+    { header: 'W/D', getValue: (s) => s.workedDays ?? 0 },
     { header: 'BASIC', getValue: (s) => safeToFixed(s.breakdown?.basic) },
   ];
 
@@ -1035,30 +1032,41 @@ const thinBorder = {
 };
 const round2 = (v) => Math.round((Number(v) || 0) * 100) / 100;
 
-export const generateSalaryExcelByMonth = async (officeId, month, year) => {
+export const generateSalaryExcelByMonth = async (officeId, month, year, filters = {}) => {
+  const { departmentId, pfStatus } = filters;
+
+  const staffMatch = { office: officeId };
+  if (departmentId && departmentId !== 'all') staffMatch.department = departmentId;
+  if (pfStatus === 'withPF') staffMatch.pfNo = { $exists: true, $nin: [null, ''] };
+  else if (pfStatus === 'withoutPF') staffMatch.$or = [{ pfNo: { $exists: false } }, { pfNo: null }, { pfNo: '' }];
+
+  const matchingStaff = await Staff.find(staffMatch).select('_id').lean();
+  const staffIds = matchingStaff.map((s) => s._id);
+
   const [salaries, salaryStructure, office] = await Promise.all([
-    Salary.find({ office: officeId, month, year }).populate('staff', 'fullName pfNo esiNo').lean(),
+    Salary.find({ office: officeId, month, year, staff: { $in: staffIds } })
+      .populate({
+        path: 'staff',
+        select: 'fullName pfNo esiNo department',
+        populate: { path: 'department', select: 'name' },
+      })
+      .lean(),
     SalaryStructure.findOne({ office: officeId }).lean(),
     Office.findById(officeId).lean(),
   ]);
 
   if (!salaries.length) {
-    throw new ApiError(404, 'Not Found!', 'No salaries found for the given month.');
+    throw new ApiError(404, 'Not Found!', 'No salaries found for the given filters.');
   }
   if (!salaryStructure) {
     throw new ApiError(404, 'Not Found!', 'Salary configuration not found for this office.');
   }
 
-  // ================================================================
-  // Column order matches the office's printed salary sheet:
-  // SL NO, NAME, RATE, NOD, BASIC, HRA, SPL ALLOWANCE, GROSS, CONV,
-  // TOTAL GROSS, PF, ESI, P TAX, L.W.F, LESS ADVANCE, TD, NET.
-  // `sum: true` marks columns that get a SUM() formula in the TOTAL row.
-  // ================================================================
   const columnDefs = [
     { header: 'SL NO', key: 'slNo', width: 8 },
-    { header: 'NAME', key: 'name', width: 24 },
-    { header: 'RATE', key: 'rate', width: 10 }, // never summed — shows "." in TOTAL row
+    { header: 'NAME', key: 'name', width: 22 },
+    { header: 'DEPARTMENT', key: 'department', width: 16 },
+    { header: 'RATE', key: 'rate', width: 10 },
     { header: 'NOD', key: 'nod', width: 8, sum: true },
     { header: 'BASIC', key: 'basic', width: 10, sum: true },
   ];
@@ -1090,16 +1098,12 @@ export const generateSalaryExcelByMonth = async (officeId, month, year) => {
   if (salaryStructure.pTax?.enabled) {
     columnDefs.push({ header: 'P TAX', key: 'pTax', width: 9, sum: true });
   }
-
-  // L.W.F — now backed by SalaryStructure.lwf + breakdown.lwf. Only
-  // rendered when enabled, with the real calculated value (was
-  // previously always shown with a hardcoded 0 placeholder).
   if (salaryStructure.lwf?.enabled) {
     columnDefs.push({ header: 'L.W.F', key: 'lwf', width: 9, sum: true });
   }
 
   columnDefs.push({ header: 'LESS ADVANCE', key: 'lessAdvance', width: 13, sum: true });
-  columnDefs.push({ header: 'TD', key: 'td', width: 10, sum: true }); // = Salary.deductions (PF+ESI+PTax+LWF+Advance)
+  columnDefs.push({ header: 'TD', key: 'td', width: 10, sum: true });
   columnDefs.push({ header: 'NET', key: 'net', width: 11, sum: true });
 
   const workbook = new ExcelJS.Workbook();
@@ -1110,7 +1114,6 @@ export const generateSalaryExcelByMonth = async (officeId, month, year) => {
     sheet.getColumn(idx + 1).width = col.width;
   });
 
-  // ---------- Row 1: Company name ----------
   sheet.mergeCells(1, 1, 1, colCount);
   const titleCell = sheet.getCell(1, 1);
   titleCell.value = office?.name?.toUpperCase() || 'COMPANY NAME';
@@ -1119,7 +1122,6 @@ export const generateSalaryExcelByMonth = async (officeId, month, year) => {
   titleCell.fill = { type: 'pattern', pattern: 'solid', fgColor: { argb: 'FFB39DDB' } };
   sheet.getRow(1).height = 20;
 
-  // ---------- Row 2: Subtitle ----------
   sheet.mergeCells(2, 1, 2, colCount);
   const subtitleCell = sheet.getCell(2, 1);
   const monthLabel = format(new Date(year, month - 1), 'MMMM').toUpperCase();
@@ -1129,7 +1131,6 @@ export const generateSalaryExcelByMonth = async (officeId, month, year) => {
   subtitleCell.fill = { type: 'pattern', pattern: 'solid', fgColor: { argb: 'FF2E86AB' } };
   sheet.getRow(2).height = 16;
 
-  // ---------- Row 3: Header ----------
   const headerRow = sheet.getRow(3);
   columnDefs.forEach((col, idx) => {
     const cell = headerRow.getCell(idx + 1);
@@ -1141,7 +1142,6 @@ export const generateSalaryExcelByMonth = async (officeId, month, year) => {
   });
   headerRow.height = 24;
 
-  // ---------- Data rows ----------
   const firstDataRow = 4;
   let rowIndex = firstDataRow;
 
@@ -1156,8 +1156,9 @@ export const generateSalaryExcelByMonth = async (officeId, month, year) => {
     const rowData = {
       slNo: i + 1,
       name: s.staff?.fullName || '-',
+      department: s.staff?.department?.name || '-',
       rate: s.baseSalary,
-      nod: (s.attendanceDetails?.totalFullDays ?? 0) + (s.attendanceDetails?.totalHalfDays ?? 0),
+      nod: s.workedDays ?? 0,
       basic: round2(s.breakdown?.basic),
       hra: round2(s.breakdown?.hra),
       splAllowance: round2(s.breakdown?.specialAllowance),
@@ -1180,16 +1181,15 @@ export const generateSalaryExcelByMonth = async (officeId, month, year) => {
       cell.value = rowData[col.key];
       cell.font = { size: 9 };
       cell.border = thinBorder;
-      cell.alignment = { horizontal: col.key === 'name' ? 'left' : 'center' };
+      cell.alignment = { horizontal: ['name', 'department'].includes(col.key) ? 'left' : 'center' };
     });
     rowIndex++;
   });
 
   const lastDataRow = rowIndex - 1;
 
-  // ---------- TOTAL row ----------
   const totalRow = sheet.getRow(rowIndex);
-  sheet.mergeCells(rowIndex, 1, rowIndex, 2);
+  sheet.mergeCells(rowIndex, 1, rowIndex, 3); // SL NO + NAME + DEPARTMENT merged now
 
   const totalLabelCell = totalRow.getCell(1);
   totalLabelCell.value = 'TOTAL';
@@ -1199,7 +1199,7 @@ export const generateSalaryExcelByMonth = async (officeId, month, year) => {
   totalLabelCell.border = thinBorder;
 
   columnDefs.forEach((col, idx) => {
-    if (idx < 2) return;
+    if (idx < 3) return; // SL NO + NAME + DEPARTMENT already merged/labeled
     const cell = totalRow.getCell(idx + 1);
     const colLetter = sheet.getColumn(idx + 1).letter;
 
@@ -1218,25 +1218,45 @@ export const generateSalaryExcelByMonth = async (officeId, month, year) => {
   return workbook.xlsx.writeBuffer();
 };
 
-export const getSalaryTableByMonth = async (officeId, month, year) => {
+export const getSalaryTableByMonth = async (officeId, month, year, filters = {}) => {
+  const { departmentId, pfStatus } = filters; // pfStatus: 'all' | 'withPF' | 'withoutPF'
+
+  // ---- Resolve which staff match the filters first ----
+  const staffMatch = { office: officeId };
+  if (departmentId && departmentId !== 'all') {
+    staffMatch.department = departmentId;
+  }
+  if (pfStatus === 'withPF') {
+    staffMatch.pfNo = { $exists: true, $nin: [null, ''] };
+  } else if (pfStatus === 'withoutPF') {
+    staffMatch.$or = [{ pfNo: { $exists: false } }, { pfNo: null }, { pfNo: '' }];
+  }
+
+  const matchingStaff = await Staff.find(staffMatch).select('_id').lean();
+  const staffIds = matchingStaff.map((s) => s._id);
+
   const [salaries, salaryStructure] = await Promise.all([
-    Salary.find({ office: officeId, month, year }).populate('staff', 'fullName pfNo esiNo').lean(),
+    Salary.find({ office: officeId, month, year, staff: { $in: staffIds } })
+      .populate({
+        path: 'staff',
+        select: 'fullName pfNo esiNo department',
+        populate: { path: 'department', select: 'name' }, // adjust field name if different
+      })
+      .lean(),
     SalaryStructure.findOne({ office: officeId }).lean(),
   ]);
 
   if (!salaries.length) {
-    throw new ApiError(404, 'Not Found!', 'No salaries found for the given month.');
+    throw new ApiError(404, 'Not Found!', 'No salaries found for the given filters.');
   }
   if (!salaryStructure) {
     throw new ApiError(404, 'Not Found!', 'Salary configuration not found for this office.');
   }
 
-  // Same conditional column shape as the Excel export, but returns
-  // plain JSON so the frontend can render a preview table before the
-  // user commits to downloading the .xlsx file.
   const columnDefs = [
     { header: 'SL NO', key: 'slNo', summable: false },
     { header: 'NAME', key: 'name', summable: false },
+    { header: 'DEPARTMENT', key: 'department', summable: false },
     { header: 'RATE', key: 'rate', summable: false },
     { header: 'NOD', key: 'nod', summable: true },
     { header: 'BASIC', key: 'basic', summable: true },
@@ -1288,8 +1308,9 @@ export const getSalaryTableByMonth = async (officeId, month, year) => {
     return {
       slNo: i + 1,
       name: s.staff?.fullName || '-',
+      department: s.staff?.department?.name || '-',
       rate: s.baseSalary,
-      nod: (s.attendanceDetails?.totalFullDays ?? 0) + (s.attendanceDetails?.totalHalfDays ?? 0),
+      nod: s.workedDays ?? 0,
       basic: round2(s.breakdown?.basic),
       hra: round2(s.breakdown?.hra),
       splAllowance: round2(s.breakdown?.specialAllowance),
@@ -1307,8 +1328,6 @@ export const getSalaryTableByMonth = async (officeId, month, year) => {
     };
   });
 
-  // Compute totals for every summable column so the frontend preview
-  // shows the exact same TOTAL row the Excel file will contain.
   const totals = columnDefs.reduce((acc, col) => {
     if (col.summable) {
       acc[col.key] = rows.reduce((sum, r) => sum + (Number(r[col.key]) || 0), 0);
@@ -1319,6 +1338,128 @@ export const getSalaryTableByMonth = async (officeId, month, year) => {
   return { columns: columnDefs, rows, totals };
 };
 
+export const generateSalaryRegisterPdf = async (officeId, month, year, filters = {}) => {
+  const { departmentId, pfStatus } = filters;
+
+  const staffMatch = { office: officeId };
+  if (departmentId && departmentId !== 'all') staffMatch.department = departmentId;
+  if (pfStatus === 'withPF') staffMatch.pfNo = { $exists: true, $nin: [null, ''] };
+  else if (pfStatus === 'withoutPF') staffMatch.$or = [{ pfNo: { $exists: false } }, { pfNo: null }, { pfNo: '' }];
+
+  const matchingStaff = await Staff.find(staffMatch).select('_id').lean();
+  const staffIds = matchingStaff.map((s) => s._id);
+
+  const [salaries, salaryStructure] = await Promise.all([
+    Salary.find({ office: officeId, month, year, staff: { $in: staffIds } })
+      .populate('office', 'name')
+      .populate({
+        path: 'staff',
+        select: 'fullName pfNo esiNo department',
+        populate: { path: 'department', select: 'name' },
+      })
+      .lean(),
+    SalaryStructure.findOne({ office: officeId }).lean(),
+  ]);
+
+  if (!salaries.length) {
+    throw new ApiError(404, 'Not Found!', 'No salaries found for the given filters.');
+  }
+  if (!salaryStructure) {
+    throw new ApiError(404, 'Not Found!', 'Salary configuration not found for this office.');
+  }
+
+  const officeName = salaries[0].office?.name || '';
+
+  // Same conditional column set as the Excel register — kept in sync
+  // so PDF, Excel, and the web preview always show identical columns.
+  const columnDefs = [
+    { header: 'SL NO', getValue: (_s, i) => i + 1 },
+    { header: 'NAME', getValue: (s) => s.staff?.fullName || '-' },
+    { header: 'DEPARTMENT', getValue: (s) => s.staff?.department?.name || '-' },
+    { header: 'RATE', getValue: (s) => s.baseSalary },
+    { header: 'NOD', getValue: (s) => s.workedDays ?? 0 },
+    { header: 'BASIC', getValue: (s) => safeToFixed(s.breakdown?.basic) },
+  ];
+
+  if (salaryStructure.hra?.enabled) {
+    columnDefs.push({ header: 'HRA', getValue: (s) => safeToFixed(s.breakdown?.hra) });
+  }
+  if (salaryStructure.specialAllowance?.enabled) {
+    columnDefs.push({ header: 'SPL ALLOW', getValue: (s) => safeToFixed(s.breakdown?.specialAllowance) });
+  }
+  if (salaryStructure.otherAllowance?.enabled) {
+    columnDefs.push({ header: 'Other Allow', getValue: (s) => safeToFixed(s.breakdown?.otherAllowance) });
+  }
+
+  columnDefs.push({
+    header: 'Gross Wages',
+    getValue: (s) =>
+      safeToFixed(
+        (s.breakdown?.basic ?? 0) +
+          (s.breakdown?.da ?? 0) +
+          (s.breakdown?.hra ?? 0) +
+          (s.breakdown?.otherAllowance ?? 0) +
+          (s.breakdown?.specialAllowance ?? 0)
+      ),
+  });
+
+  if (salaryStructure.conveyance?.enabled) {
+    columnDefs.push({ header: 'CONV', getValue: (s) => safeToFixed(s.breakdown?.conveyance) });
+  }
+
+  columnDefs.push({ header: 'TOTAL GROSS', getValue: (s) => safeToFixed(s.grossSalary) });
+
+  if (salaryStructure.pf?.enabled) {
+    columnDefs.push({ header: 'PF', getValue: (s) => safeToFixed(s.breakdown?.pf) });
+  }
+  if (salaryStructure.esi?.enabled) {
+    columnDefs.push({ header: 'ESI', getValue: (s) => safeToFixed(s.breakdown?.esi) });
+  }
+  if (salaryStructure.pTax?.enabled) {
+    columnDefs.push({ header: 'P TAX', getValue: (s) => safeToFixed(s.breakdown?.pTax) });
+  }
+  if (salaryStructure.lwf?.enabled) {
+    columnDefs.push({ header: 'LWF', getValue: (s) => safeToFixed(s.breakdown?.lwf) });
+  }
+
+  columnDefs.push({ header: 'ADV.', getValue: (s) => safeToFixed(s.breakdown?.advanceDeduction) });
+  columnDefs.push({ header: 'TD', getValue: (s) => safeToFixed(s.deductions) });
+  columnDefs.push({ header: 'Net Amt.', getValue: (s) => s.netSalary });
+
+  const doc = new jsPDF({ format: 'a4', orientation: 'l' });
+  const pageWidth = doc.internal.pageSize.width || doc.internal.pageSize.getWidth();
+  const pageHeight = doc.internal.pageSize.height || doc.internal.pageSize.getHeight();
+
+  doc.setFont('times', 'bold');
+  doc.setFontSize(14);
+  doc.text(`SALARY REGISTER — ${format(new Date(year, month - 1), 'MMMM').toUpperCase()} ${year}`, pageWidth / 2, 10, {
+    align: 'center',
+  });
+  doc.setFontSize(10);
+  doc.text(officeName, pageWidth / 2, 15, { align: 'center' });
+
+  const headers = [columnDefs.map((col) => col.header)];
+  const rows = salaries.map((s, i) => columnDefs.map((col) => col.getValue(s, i)));
+
+  autoTable(doc, {
+    startY: 20,
+    head: headers,
+    body: rows,
+    theme: 'grid',
+    styles: { fontSize: 7, cellPadding: 1.5 },
+    headStyles: { fillColor: [46, 134, 171], fontSize: 7 },
+    showHead: 'everyPage', // header repeats automatically on every new page
+    didDrawPage: (data) => {
+      doc.setFontSize(8);
+      const generatedDate = `Generated: ${new Date().toLocaleDateString()} ${new Date().toLocaleTimeString()}`;
+      const textWidth = doc.getTextWidth(generatedDate);
+      doc.text(generatedDate, pageWidth - data.settings.margin.right - textWidth, pageHeight - 10);
+      doc.text(`Page ${doc.internal.getNumberOfPages()}`, data.settings.margin.left, pageHeight - 10);
+    },
+  });
+
+  return doc.output('arraybuffer');
+};
 
 async function creditHolidayLeavesFund(office, month, year, staff, amount) {
   try {
@@ -1367,7 +1508,9 @@ export const updateManualConveyanceForSalary = async (officeId, salaryId, convey
       },
     },
     { new: true }
-  ).populate('staff', 'fullName staffId');
+  )
+    .populate('staff', 'fullName staffId')
+    .lean();
 
   return updatedSalary;
 };

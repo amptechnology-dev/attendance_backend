@@ -8,6 +8,7 @@ import {
   generateSalaryByMonth,
   generateSalaryExcelByMonth,
   getSalaryTableByMonth,
+  generateSalaryRegisterPdf,
   updateManualConveyanceForSalary,
 } from '../services/salary.service.js';
 import { AdvanceTransaction } from '../models/salary.model.js';
@@ -46,6 +47,9 @@ export const putSalaryStructure = expressAsyncHandler(async (req, res) => {
     }
   }
 
+  if (basicSalary?.calculationType && !['onGross', 'onTotalSalary'].includes(basicSalary.calculationType)) {
+    return new ApiResponse(400, null, 'Invalid basicSalary.calculationType value.').send(res);
+  }
   if (hra?.enabled && !['basic', 'gross', 'basicPlusDa'].includes(hra.calculateOn)) {
     return new ApiResponse(400, null, 'Invalid hra.calculateOn value.').send(res);
   }
@@ -122,12 +126,7 @@ export const getSalaryStructure = expressAsyncHandler(async (req, res) => {
 export const autoCalculateAllSalaryByMonth = expressAsyncHandler(async (req, res) => {
   const { month, year } = req.body;
 
-  const data = await autoCalculateAllSalary(
-    req.admin.office,
-    month,
-    year,
-    req.admin._id
-  );
+  const data = await autoCalculateAllSalary(req.admin.office, month, year, req.admin._id);
 
   return new ApiResponse(200, data, 'Salary calculated successfully.').send(res);
 });
@@ -243,9 +242,11 @@ export const getSalaryPdfByMonth = expressAsyncHandler(async (req, res) => {
 });
 
 export const getSalaryExcelByMonth = expressAsyncHandler(async (req, res) => {
-  const { month, year } = req.body;
-
-  const excelBuffer = await generateSalaryExcelByMonth(req.admin.office, parseInt(month), parseInt(year));
+  const { month, year, departmentId, pfStatus } = req.body;
+  const excelBuffer = await generateSalaryExcelByMonth(req.admin.office, parseInt(month), parseInt(year), {
+    departmentId,
+    pfStatus,
+  });
 
   res.setHeader('Content-Type', 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet');
   res.setHeader('Content-Disposition', `attachment; filename="salary_sheet_${month}_${year}.xlsx"`);
@@ -253,9 +254,24 @@ export const getSalaryExcelByMonth = expressAsyncHandler(async (req, res) => {
 });
 
 export const getSalaryTablesByMonth = expressAsyncHandler(async (req, res) => {
-  const { month, year } = req.body;
-  const data = await getSalaryTableByMonth(req.admin.office, parseInt(month), parseInt(year));
+  const { month, year, departmentId, pfStatus } = req.body;
+  const data = await getSalaryTableByMonth(req.admin.office, parseInt(month), parseInt(year), {
+    departmentId,
+    pfStatus,
+  });
   return new ApiResponse(200, data, 'Salary table fetched successfully.').send(res);
+});
+
+export const getSalaryRegisterPdfByMonth = expressAsyncHandler(async (req, res) => {
+  const { month, year, departmentId, pfStatus } = req.body;
+  const pdfBuffer = await generateSalaryRegisterPdf(req.admin.office, parseInt(month), parseInt(year), {
+    departmentId,
+    pfStatus,
+  });
+
+  res.setHeader('Content-Type', 'application/pdf');
+  res.setHeader('Content-Disposition', `attachment; filename="salary_register_${month}_${year}.pdf"`);
+  res.send(Buffer.from(pdfBuffer));
 });
 
 export const getAdvanceSalaryTransactions = expressAsyncHandler(async (req, res) => {

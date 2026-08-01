@@ -12,7 +12,10 @@ export const salaryStructureSchema = yup.object().shape({
   basicSalary: yup
     .object()
     .shape({
-      calculationType: yup.string().oneOf(['perDay', 'fixed'], 'Invalid basic salary calculation type').required(),
+      calculationType: yup
+        .string()
+        .oneOf(['onGross', 'onTotalSalary'], 'Invalid basic salary calculation type')
+        .required(),
       percentage: yup
         .number()
         .typeError('Basic percentage must be a number')

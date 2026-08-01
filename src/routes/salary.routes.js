@@ -12,6 +12,7 @@ import {
   getSalaryPdfByMonth,
   getSalaryExcelByMonth,
   getSalaryTablesByMonth,
+  getSalaryRegisterPdfByMonth,
   getAdvanceSalaryTransactions,
   getHolidayFundTransactions,
   getPastMonthSalary,
@@ -38,6 +39,7 @@ router.route('/slip/get-by-staff').post(parseMonthInput, validate(monthYearSchem
 router.route('/slip/get-by-month').post(parseMonthInput, validate(monthYearSchema), getSalaryPdfByMonth);
 router.route('/excel/get-by-month').post(parseMonthInput, validate(monthYearSchema), getSalaryExcelByMonth);
 router.route('/table/get-by-month').post(parseMonthInput, validate(monthYearSchema), getSalaryTablesByMonth);
+router.route('/register/pdf/get-by-month').post(parseMonthInput, validate(monthYearSchema), getSalaryRegisterPdfByMonth);
 router.route('/advance-transaction/get').get(getAdvanceSalaryTransactions);
 router.route('/holiday-fund-transaction/get').get(getHolidayFundTransactions);
 router.route('/:salaryId/conveyance/update').put(updateManualConveyance);
