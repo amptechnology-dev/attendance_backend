@@ -73,6 +73,9 @@ const autoCalculateAllSalaryByMonth = async (officeId, month, year) => {
     const halfDayAllowed =
       Number.isFinite(dutyTiming.halfDayAllowed) && dutyTiming.halfDayAllowed >= 0 ? dutyTiming.halfDayAllowed : 2;
 
+    // helper: normalize a date to a YYYY-MM-DD key so we can look up "the next day"
+    const toDateKey = (date) => new Date(date).toISOString().slice(0, 10);
+
     const results = await Promise.all(
       staffList.map(async (staff) => {
         if (!staff.monthlySalary || staff.monthlySalary <= 0) {
@@ -92,15 +95,21 @@ const autoCalculateAllSalaryByMonth = async (officeId, month, year) => {
           date: { $gte: monthStartDate, $lte: monthEndDate },
         });
 
+        // sort chronologically + map by date so we can check "the next day's" status for week-off rule
+        const sortedAttendance = [...attendanceData].sort((a, b) => new Date(a.date) - new Date(b.date));
+        const attendanceByDate = new Map(sortedAttendance.map((a) => [toDateKey(a.date), a]));
+
         let totalFullDays = 0,
           totalHalfDays = 0,
           totalHourPay = 0,
           overtimeHours = 0,
           totalPaidLeaves = 0,
           totalUnpaidLeaves = 0,
-          totalHourlyDays = 0;
+          totalHourlyDays = 0,
+          totalWeekOffDays = 0, // paid week-offs — counted in W/D
+          totalUnpaidWeekOffDays = 0; // week-off followed by unadjusted Absent — NOT counted in W/D
 
-        attendanceData.forEach((attendance) => {
+        sortedAttendance.forEach((attendance) => {
           if (attendance.hrAdjustments.adjustments !== 'None') {
             switch (attendance.hrAdjustments.adjustments) {
               case 'Half-day to Full-day':
@@ -132,9 +141,27 @@ const autoCalculateAllSalaryByMonth = async (officeId, month, year) => {
             totalFullDays++;
           } else if (attendance.status === 'half-day') {
             totalHalfDays++;
+          } else if (attendance.status === 'week-off') {
+            // Rule: week-off is paid UNLESS the very next day is an unadjusted Absent —
+            // in that case the week-off itself becomes unpaid too.
+            const nextDate = new Date(attendance.date);
+            nextDate.setDate(nextDate.getDate() + 1);
+            const nextDayAttendance = attendanceByDate.get(toDateKey(nextDate));
+
+            const nextDayIsUnadjustedAbsent =
+              nextDayAttendance?.status === 'absent' &&
+              nextDayAttendance?.hrAdjustments?.adjustments === 'None';
+
+            if (nextDayIsUnadjustedAbsent) {
+              totalUnpaidWeekOffDays++;
+            } else {
+              totalWeekOffDays++;
+            }
           } else if (attendance.status === 'absent' || attendance.status === 'present') {
             attendance.leaveStatus === 'paid' ? totalPaidLeaves++ : totalUnpaidLeaves++;
           }
+          // 'holiday' status still intentionally falls through — unrelated to this change,
+          // handled separately below via the Leave collection (holidayLeaves).
         });
 
         const holidayLeaves = await Leave.find({
@@ -149,7 +176,7 @@ const autoCalculateAllSalaryByMonth = async (officeId, month, year) => {
           leave.isPaid ? (totalPaidLeaves += leave.noOfDays) : (holidayLeavesCount += leave.noOfDays);
         });
 
-        if (!totalFullDays && !totalHalfDays && !totalHourPay) {
+        if (!totalFullDays && !totalHalfDays && !totalHourPay && !totalWeekOffDays) {
           return { staffId: staff._id, message: 'No attendance recorded. Skipping salary calculation.' };
         }
 
@@ -157,10 +184,16 @@ const autoCalculateAllSalaryByMonth = async (officeId, month, year) => {
         const extraHalfDays = totalHalfDays - forgivenHalfDays;
         const unpaidHalfDays = extraHalfDays * 0.5;
 
-        const totalUnpaidDays = totalUnpaidLeaves + holidayLeavesCount + unpaidHalfDays;
-        const paidDays = daysInMonth - totalUnpaidDays;
+        const totalUnpaidDays = totalUnpaidLeaves + holidayLeavesCount + unpaidHalfDays + totalUnpaidWeekOffDays;
 
-        const workedDays = totalFullDays + forgivenHalfDays + extraHalfDays * 0.5;
+        // W/D (workedDays): Full-day + Half-day (forgiven/extra) + Paid Leaves + PAID Week-Off only
+        const workedDays =
+          totalFullDays + forgivenHalfDays + extraHalfDays * 0.5 + totalPaidLeaves + totalWeekOffDays;
+
+        // paidDays feeds the money math (perDay gross, basic-on-total, etc.)
+        // kept as the SAME number as workedDays — single source of truth,
+        // so W/D shown on payslip/Excel always matches what gross salary was based on.
+        const paidDays = workedDays;
 
         const dailyRate = staff.monthlySalary / daysInMonth;
         const hourlyPay = totalHourPay * (dailyRate / dailyWorkHours);
@@ -244,7 +277,6 @@ const autoCalculateAllSalaryByMonth = async (officeId, month, year) => {
         const pTax = salaryStructure.pTax.enabled ? calculatePTax(grossSalary) : 0;
 
         // ---------- LWF ----------
-
         let lwfDeduction = 0;
         if (salaryStructure.lwf.enabled) {
           let lwfBase;
@@ -282,12 +314,11 @@ const autoCalculateAllSalaryByMonth = async (officeId, month, year) => {
 
         const unpaidHolidayLeaveDeduction = Math.min(holidayLeavesCount * dailyRate, grossSalary);
 
-       
         const setFields = {
           baseSalary,
           totalPayableDays: daysInMonth,
-          paidDays, 
-          workedDays, 
+          paidDays,
+          workedDays,
           attendanceDetails: { totalFullDays, totalHalfDays, totalHourPay, overtimeHours },
           leaves: {
             totalPaidLeaves,
@@ -302,52 +333,41 @@ const autoCalculateAllSalaryByMonth = async (officeId, month, year) => {
         };
         const unsetFields = {};
 
-        // DA
         if (salaryStructure.da.enabled) setFields['breakdown.da'] = da;
         else unsetFields['breakdown.da'] = '';
 
         if (salaryStructure.otherAllowance.enabled) setFields['breakdown.otherAllowance'] = otherAllowance;
         else unsetFields['breakdown.otherAllowance'] = '';
 
-        // HRA
         if (salaryStructure.hra.enabled) setFields['breakdown.hra'] = hra;
         else unsetFields['breakdown.hra'] = '';
 
-        // Conveyance
         if (salaryStructure.conveyance.enabled) setFields['breakdown.conveyance'] = conveyance;
         else unsetFields['breakdown.conveyance'] = '';
 
-        // Special Allowance
         if (salaryStructure.specialAllowance.enabled) setFields['breakdown.specialAllowance'] = specialAllowance;
         else unsetFields['breakdown.specialAllowance'] = '';
 
-        // ESI
         if (salaryStructure.esi.enabled && staff.esiNo) setFields['breakdown.esi'] = esiDeduction;
         else unsetFields['breakdown.esi'] = '';
 
-        // PF
         if (salaryStructure.pf.enabled && staff.pfNo) setFields['breakdown.pf'] = pfDeduction;
         else unsetFields['breakdown.pf'] = '';
 
-        // PTax
         if (salaryStructure.pTax.enabled) setFields['breakdown.pTax'] = pTax;
         else unsetFields['breakdown.pTax'] = '';
 
         if (salaryStructure.lwf.enabled) setFields['breakdown.lwf'] = lwfDeduction;
         else unsetFields['breakdown.lwf'] = '';
 
-        // Hourly pay — only persist if hourly-adjusted attendance actually occurred this month
         if (totalHourlyDays > 0) setFields['breakdown.hourlyPay'] = hourlyPay;
         else unsetFields['breakdown.hourlyPay'] = '';
 
-        // Bonus — TODO: not calculated yet, so never persisted until implemented
         unsetFields['breakdown.bonus'] = '';
 
-        // Overtime — only persist if overtime hours actually logged this month
         if (overtimeHours > 0) setFields['breakdown.overtime'] = overtimePay;
         else unsetFields['breakdown.overtime'] = '';
 
-        // Advance deduction — only persist if an advance was actually deducted
         if (advanceDeduction > 0) setFields['breakdown.advanceDeduction'] = advanceDeduction;
         else unsetFields['breakdown.advanceDeduction'] = '';
 
