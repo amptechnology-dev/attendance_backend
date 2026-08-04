@@ -73,8 +73,12 @@ const autoCalculateAllSalaryByMonth = async (officeId, month, year) => {
     const halfDayAllowed =
       Number.isFinite(dutyTiming.halfDayAllowed) && dutyTiming.halfDayAllowed >= 0 ? dutyTiming.halfDayAllowed : 2;
 
-    // helper: normalize a date to a YYYY-MM-DD key so we can look up "the next day"
+    // helper: normalize a date to a YYYY-MM-DD key so we can look up neighboring days
     const toDateKey = (date) => new Date(date).toISOString().slice(0, 10);
+
+    // helper: is this attendance record an "unadjusted Absent" (real absence, not HR-corrected)?
+    const isUnadjustedAbsent = (record) =>
+      record?.status === 'absent' && record?.hrAdjustments?.adjustments === 'None';
 
     const results = await Promise.all(
       staffList.map(async (staff) => {
@@ -95,7 +99,7 @@ const autoCalculateAllSalaryByMonth = async (officeId, month, year) => {
           date: { $gte: monthStartDate, $lte: monthEndDate },
         });
 
-        // sort chronologically + map by date so we can check "the next day's" status for week-off rule
+        // sort + map by date so we can look up both the previous AND next day for the sandwich rule
         const sortedAttendance = [...attendanceData].sort((a, b) => new Date(a.date) - new Date(b.date));
         const attendanceByDate = new Map(sortedAttendance.map((a) => [toDateKey(a.date), a]));
 
@@ -106,8 +110,8 @@ const autoCalculateAllSalaryByMonth = async (officeId, month, year) => {
           totalPaidLeaves = 0,
           totalUnpaidLeaves = 0,
           totalHourlyDays = 0,
-          totalWeekOffDays = 0, // paid week-offs — counted in W/D
-          totalUnpaidWeekOffDays = 0; // week-off followed by unadjusted Absent — NOT counted in W/D
+          totalWeekOffDays = 0, // paid week-off / holiday days — counted in W/D
+          totalUnpaidWeekOffDays = 0; // sandwiched week-off / holiday — NOT counted in W/D
 
         sortedAttendance.forEach((attendance) => {
           if (attendance.hrAdjustments.adjustments !== 'None') {
@@ -141,18 +145,20 @@ const autoCalculateAllSalaryByMonth = async (officeId, month, year) => {
             totalFullDays++;
           } else if (attendance.status === 'half-day') {
             totalHalfDays++;
-          } else if (attendance.status === 'week-off') {
-            // Rule: week-off is paid UNLESS the very next day is an unadjusted Absent —
-            // in that case the week-off itself becomes unpaid too.
+          } else if (attendance.status === 'week-off' || attendance.status === 'holiday') {
+            // Sandwich rule: WO/Holiday is paid UNLESS the day right before OR right after
+            // is an unadjusted Absent — in that case this WO/Holiday itself becomes unpaid.
+            const prevDate = new Date(attendance.date);
+            prevDate.setDate(prevDate.getDate() - 1);
             const nextDate = new Date(attendance.date);
             nextDate.setDate(nextDate.getDate() + 1);
+
+            const prevDayAttendance = attendanceByDate.get(toDateKey(prevDate));
             const nextDayAttendance = attendanceByDate.get(toDateKey(nextDate));
 
-            const nextDayIsUnadjustedAbsent =
-              nextDayAttendance?.status === 'absent' &&
-              nextDayAttendance?.hrAdjustments?.adjustments === 'None';
+            const isSandwiched = isUnadjustedAbsent(prevDayAttendance) || isUnadjustedAbsent(nextDayAttendance);
 
-            if (nextDayIsUnadjustedAbsent) {
+            if (isSandwiched) {
               totalUnpaidWeekOffDays++;
             } else {
               totalWeekOffDays++;
@@ -160,8 +166,6 @@ const autoCalculateAllSalaryByMonth = async (officeId, month, year) => {
           } else if (attendance.status === 'absent' || attendance.status === 'present') {
             attendance.leaveStatus === 'paid' ? totalPaidLeaves++ : totalUnpaidLeaves++;
           }
-          // 'holiday' status still intentionally falls through — unrelated to this change,
-          // handled separately below via the Leave collection (holidayLeaves).
         });
 
         const holidayLeaves = await Leave.find({
@@ -186,7 +190,7 @@ const autoCalculateAllSalaryByMonth = async (officeId, month, year) => {
 
         const totalUnpaidDays = totalUnpaidLeaves + holidayLeavesCount + unpaidHalfDays + totalUnpaidWeekOffDays;
 
-        // W/D (workedDays): Full-day + Half-day (forgiven/extra) + Paid Leaves + PAID Week-Off only
+        // W/D (workedDays): Full-day + Half-day (forgiven/extra) + Paid Leaves + PAID Week-Off/Holiday only
         const workedDays =
           totalFullDays + forgivenHalfDays + extraHalfDays * 0.5 + totalPaidLeaves + totalWeekOffDays;
 
