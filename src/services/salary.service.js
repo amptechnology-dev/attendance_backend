@@ -54,9 +54,6 @@ const autoCalculateAllSalaryByMonth = async (officeId, month, year) => {
       locked: true,
     });
 
-    if (alreadyCalculated) {
-      throw new Error(`Salary for ${month}/${year} has already been calculated.`);
-    }
     const salaryStructure = await SalaryStructure.findOne({ office: officeId });
     if (!salaryStructure) throw new Error('Salary configuration not found.');
     const { startDate: monthStartDate, endDate: monthEndDate } = getMonthBoundariesFormatted(month, year);
@@ -77,8 +74,7 @@ const autoCalculateAllSalaryByMonth = async (officeId, month, year) => {
     const toDateKey = (date) => new Date(date).toISOString().slice(0, 10);
 
     // helper: is this attendance record an "unadjusted Absent" (real absence, not HR-corrected)?
-    const isUnadjustedAbsent = (record) =>
-      record?.status === 'absent' && record?.hrAdjustments?.adjustments === 'None';
+    const isUnadjustedAbsent = (record) => record?.status === 'absent' && record?.hrAdjustments?.adjustments === 'None';
 
     const results = await Promise.all(
       staffList.map(async (staff) => {
@@ -111,7 +107,8 @@ const autoCalculateAllSalaryByMonth = async (officeId, month, year) => {
           totalUnpaidLeaves = 0,
           totalHourlyDays = 0,
           totalWeekOffDays = 0, // paid week-off / holiday days — counted in W/D
-          totalUnpaidWeekOffDays = 0; // sandwiched week-off / holiday — NOT counted in W/D
+          totalUnpaidWeekOffDays = 0, // sandwiched week-off / holiday — NOT counted in W/D
+          totalOffDayWorkDays = 0; // NEW: worked on a scheduled week-off/holiday (status present/half-day + isOffDayWork) — always full pay
 
         sortedAttendance.forEach((attendance) => {
           if (attendance.hrAdjustments.adjustments !== 'None') {
@@ -141,6 +138,12 @@ const autoCalculateAllSalaryByMonth = async (officeId, month, year) => {
                 attendance.leaveStatus === 'paid' ? totalPaidLeaves++ : totalUnpaidLeaves++;
                 break;
             }
+          } else if ((attendance.status === 'present' || attendance.status === 'half-day') && attendance.isOffDayWork) {
+            // NEW: this day was a scheduled week-off/holiday, but staff actually worked (P or HD) —
+            // gets FULL day salary regardless of P/HD, bypasses normal half-day forgiveness/leave logic.
+            // isOffDayWork is now set reliably in autoAttendanceCalculateByStaffId (root fix),
+            // independent of whether a formal OffDayWork assignment exists.
+            totalOffDayWorkDays++;
           } else if (attendance.status === 'full-day') {
             totalFullDays++;
           } else if (attendance.status === 'half-day') {
@@ -180,7 +183,7 @@ const autoCalculateAllSalaryByMonth = async (officeId, month, year) => {
           leave.isPaid ? (totalPaidLeaves += leave.noOfDays) : (holidayLeavesCount += leave.noOfDays);
         });
 
-        if (!totalFullDays && !totalHalfDays && !totalHourPay && !totalWeekOffDays) {
+        if (!totalFullDays && !totalHalfDays && !totalHourPay && !totalWeekOffDays && !totalOffDayWorkDays) {
           return { staffId: staff._id, message: 'No attendance recorded. Skipping salary calculation.' };
         }
 
@@ -190,9 +193,15 @@ const autoCalculateAllSalaryByMonth = async (officeId, month, year) => {
 
         const totalUnpaidDays = totalUnpaidLeaves + holidayLeavesCount + unpaidHalfDays + totalUnpaidWeekOffDays;
 
-        // W/D (workedDays): Full-day + Half-day (forgiven/extra) + Paid Leaves + PAID Week-Off/Holiday only
+        // W/D (workedDays): Full-day + Half-day (forgiven/extra) + Paid Leaves + PAID Week-Off/Holiday
+        // + Off-Day-Work days (worked on a scheduled week-off/holiday — always full credit)
         const workedDays =
-          totalFullDays + forgivenHalfDays + extraHalfDays * 0.5 + totalPaidLeaves + totalWeekOffDays;
+          totalFullDays +
+          forgivenHalfDays +
+          extraHalfDays * 0.5 +
+          totalPaidLeaves +
+          totalWeekOffDays +
+          totalOffDayWorkDays;
 
         // paidDays feeds the money math (perDay gross, basic-on-total, etc.)
         // kept as the SAME number as workedDays — single source of truth,
@@ -388,15 +397,6 @@ const autoCalculateAllSalaryByMonth = async (officeId, month, year) => {
         return { staffId: staff._id, netSalary, message: 'Salary calculated successfully.' };
       })
     );
-
-    await SalaryCalculation.create({
-      office: officeId,
-      month,
-      year,
-      locked: true,
-      calculatedBy: null,
-    });
-
     return results;
   } catch (error) {
     logger.error('Error while auto calculating salary:', error);

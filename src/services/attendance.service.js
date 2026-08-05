@@ -43,8 +43,6 @@ export const autoAttendanceCalculateByStaffId = async (office, staffId, date = n
   const offDayType = holiday ? 'holiday' : 'week-off';
 
   // ---------- Step 2: EntryExitLog আগে fetch করো ----------
-  // FIX (Scenario 7/8): status নির্ধারণ হবে আসল log এর presence দিয়ে,
-  // OffDayWork assignment দিয়ে না। Assignment শুধু benefit/validation-এর জন্য ব্যবহার হবে।
   const startOfDay = new Date(`${currentDate}T00:00:00.000+05:30`);
   const endOfDay = new Date(`${currentDate}T23:59:59.999+05:30`);
 
@@ -102,7 +100,7 @@ export const autoAttendanceCalculateByStaffId = async (office, staffId, date = n
         staffId,
         logs[0].entryTime,
         firstHalfStart,
-        currentDate, // FIX: quota এখন শুধু আজকের আগের দিন গুলো থেকে count হবে
+        currentDate,
         dutyTiming?.lateAllowed,
         dutyTiming?.lateEntryTime
       );
@@ -121,6 +119,10 @@ export const autoAttendanceCalculateByStaffId = async (office, staffId, date = n
         logs: [logs[0]._id],
         isLate,
         allowedLate,
+        // FIX: entry হওয়া মাত্রই যদি এটা off-day হয়, isOffDayWork সাথে সাথেই true —
+        // পুরো day complete হওয়ার জন্য অপেক্ষা করতে হবে না, নাহলে exit করার আগে
+        // কেউ interim state-এ থেকে গেলে এই flag miss হয়ে যেতে পারত।
+        ...(isOffDay && { isOffDayWork: true }),
       },
       { upsert: true, new: true }
     );
@@ -171,10 +173,10 @@ export const autoAttendanceCalculateByStaffId = async (office, staffId, date = n
         ? 'full-day'
         : firstHalf === 'present' || secondHalf === 'present'
           ? 'half-day'
-          : 'present'; // Scenario 3 & 5 => neither half covered => "present"
+          : 'present';
   }
 
-  // ---------- Off-day work benefit validity (assignment থাকলে) ----------
+  // ---------- Off-day work benefit validity (assignment থাকলে — শুধুমাত্র formal validation-এর জন্য) ----------
   let isOffDayValid = false;
   if (isOffDayWorkAssigned) {
     const { workType: requiredWorkType } = isOffDayWorkAssigned;
@@ -182,9 +184,9 @@ export const autoAttendanceCalculateByStaffId = async (office, staffId, date = n
     if (requiredWorkType === 'hourly') {
       isOffDayValid = true;
     } else if (requiredWorkType === 'full-day') {
-      isOffDayValid = totalWorkTime >= fullDayMinutes * 0.9; // ~পুরো দিনের কাছাকাছি কাজ
+      isOffDayValid = totalWorkTime >= fullDayMinutes * 0.9;
     } else if (requiredWorkType === 'half-day') {
-      isOffDayValid = totalWorkTime >= fullDayMinutes * 0.4; // অন্তত অর্ধেক দিনের কাছাকাছি
+      isOffDayValid = totalWorkTime >= fullDayMinutes * 0.4;
     }
   }
 
@@ -200,10 +202,16 @@ export const autoAttendanceCalculateByStaffId = async (office, staffId, date = n
       logs: logs.map((log) => log._id),
       isLate,
       allowedLate,
-      ...(isOffDayWorkAssigned && {
+      // FIX (root cause): isOffDayWork এখন শুধু "আজ off-day ছিল এবং staff কাজ করেছে"
+      // এর উপর নির্ভর করে সেট হবে — formal OffDayWork assignment থাকা-না-থাকার উপর নয়।
+      // offDayAssignmentId / validOffDayWork আলাদা জিনিস — সেগুলো শুধু formal assignment
+      // থাকলেই সেট হবে (approval/validation-এর জন্য), isOffDayWork-এর pre-condition না।
+      ...(isOffDay && {
         isOffDayWork: true,
-        offDayAssignmentId: isOffDayWorkAssigned._id,
-        validOffDayWork: isOffDayValid,
+        ...(isOffDayWorkAssigned && {
+          offDayAssignmentId: isOffDayWorkAssigned._id,
+          validOffDayWork: isOffDayValid,
+        }),
       }),
     },
     { upsert: true, new: true }

@@ -294,8 +294,17 @@ export const putHrAdjustment = expressAsyncHandler(async (req, res) => {
     ]);
   }
 
+  // FIX: Leave/Week-off/Holiday-তে কাজ করা দিনে HR adjustment করা যাবে না
+  if (attendance.isOffDayWork) {
+    throw new ApiError(400, 'Validation Failed!', [
+      {
+        field: 'adjustments',
+        message: `Attendance dated ${attendance.date.toISOString().slice(0, 10)} is an off-day-work (leave/week-off/holiday) record and cannot be HR-adjusted.`,
+      },
+    ]);
+  }
+
   // Status validation
-  // FIX: নতুন ৩টা "...to Absent" adjustment-এর জন্য current status validation যোগ করা হলো
   if (
     (adjustments === 'Present to Half-day' && attendance.status !== 'present') ||
     (adjustments === 'Hourly' && attendance.status !== 'present') ||
@@ -368,7 +377,6 @@ export const bulkHrAdjustment = expressAsyncHandler(async (req, res) => {
   // ==============================
   // Validation
   // ==============================
-  // FIX: নতুন ৩টা "...to Absent" adjustment type validation list-এ যোগ করা হলো
   if (
     ![
       'None',
@@ -446,8 +454,18 @@ export const bulkHrAdjustment = expressAsyncHandler(async (req, res) => {
       ]);
     }
 
+    // FIX: Leave/Week-off/Holiday-তে কাজ করা দিনে HR adjustment করা যাবে না —
+    // এই দিনগুলো এমনিতেই full-pay হিসেবে count হয়, এতে টাচ করলে সেই guarantee ভেঙে যায়।
+    if (attendance.isOffDayWork) {
+      throw new ApiError(400, 'Validation Failed!', [
+        {
+          field: 'adjustments',
+          message: `Attendance dated ${attendance.date.toISOString().slice(0, 10)} is an off-day-work (leave/week-off/holiday) record and cannot be HR-adjusted.`,
+        },
+      ]);
+    }
+
     // Status validation
-    // FIX: নতুন ৩টা "...to Absent" adjustment-এর জন্য current status validation যোগ করা হলো
     if (
       (adjustments === 'Present to Half-day' && attendance.status !== 'present') ||
       (adjustments === 'Hourly' && attendance.status !== 'present') ||
@@ -489,6 +507,7 @@ export const bulkHrAdjustment = expressAsyncHandler(async (req, res) => {
 
   return new ApiResponse(200, updatedAttendances, 'HR adjustments updated successfully.').send(res);
 });
+
 
 export const getAllHolidayLeave = expressAsyncHandler(async (req, res) => {
   const holidayLeaves = await Leave.find({ office: req.admin.office, type: 'holidayLeave' })
