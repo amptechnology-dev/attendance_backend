@@ -573,26 +573,31 @@ const autoCalculateAllSalaryByMonth = async (officeId, month, year) => {
 };
 */
 
-export const saveAdvanceSalary = async (
+export const saveAdvanceSalary = async ({
   staffId,
   totalAmount,
   remainingAmount,
   remainingMonths,
   remarks = '',
   pauseTill = undefined,
-  action = 'update'
-) => {
+  action = 'update',
+}) => {
   const staff = await Staff.findById(staffId);
-  if (!staff) throw new Error('Staff not found');
+  if (!staff) {
+    throw new Error('Staff not found');
+  }
 
   if (action === 'add') {
     if (staff.advanceSalary && staff.advanceSalary.remainingAmount > 0) {
       throw new ApiError(400, 'Unpaid advance found!', [
-        { message: 'Staff already has a pending advance. Please clear it first.' },
+        {
+          message: 'Staff already has a pending advance. Please clear it first.',
+        },
       ]);
     }
 
     const monthlyDeduction = Math.ceil(remainingAmount / (remainingMonths || 1));
+
     staff.advanceSalary = {
       totalAmount,
       remainingAmount,
@@ -600,7 +605,9 @@ export const saveAdvanceSalary = async (
       monthlyDeduction,
       remarks,
     };
+
     await staff.save();
+
     await AdvanceTransaction.create({
       office: staff.office,
       staff: staffId,
@@ -609,27 +616,41 @@ export const saveAdvanceSalary = async (
       newMonths: remainingMonths,
       remarks,
     });
+
     return staff.advanceSalary;
   }
 
   if (action === 'update') {
     if (!staff.advanceSalary) {
-      throw new ApiError(400, 'No advance found!', [{ message: 'Staff does not have an advance.' }]);
+      throw new ApiError(400, 'No advance found!', [
+        {
+          message: 'Staff does not have an advance.',
+        },
+      ]);
     }
+
     const oldRemaining = staff.advanceSalary.remainingAmount;
+
     const oldMonths = staff.advanceSalary.remainingMonths;
+
     const updatedRemaining = Math.max(0, remainingAmount);
+
     const updatedMonths = Math.max(0, remainingMonths);
 
-    if (updatedRemaining == 0 && updatedMonths == 0) {
+    if (updatedRemaining === 0 && updatedMonths === 0) {
       staff.advanceSalary = undefined;
     } else {
       staff.advanceSalary.remainingAmount = updatedRemaining;
+
       staff.advanceSalary.remainingMonths = updatedMonths;
+
       staff.advanceSalary.monthlyDeduction = updatedMonths > 0 ? Math.ceil(updatedRemaining / updatedMonths) : 0;
+
       staff.advanceSalary.remarks = remarks;
+
       staff.advanceSalary.pauseTill = pauseTill;
     }
+
     await staff.save();
 
     await AdvanceTransaction.create({
@@ -638,13 +659,17 @@ export const saveAdvanceSalary = async (
       type: 'update',
       amount: Math.abs(updatedRemaining - oldRemaining),
       remarks,
+
       previousAmount: oldRemaining,
       newAmount: updatedRemaining,
+
       previousMonths: oldMonths,
       newMonths: updatedMonths,
     });
+
     return staff.advanceSalary;
   }
+
   throw new Error(`Unsupported action type: ${action}`);
 };
 /*

@@ -74,9 +74,10 @@ const staffSchema = new mongoose.Schema(
       default: null,
     },
     aadhaarNo: {
-      type: Number,
+      type: String,
       unique: true,
       sparse: true,
+      trim: true,
       default: null,
     },
     monthlySalary: Number,

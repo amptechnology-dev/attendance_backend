@@ -91,7 +91,14 @@ export const putSalaryStructure = expressAsyncHandler(async (req, res) => {
 
 export const addAdvanceSalary = expressAsyncHandler(async (req, res) => {
   const { staffId, totalAmount, remainingAmount, remainingMonths, remarks } = req.body;
-  const result = await saveAdvanceSalary(staffId, totalAmount, remainingAmount, remainingMonths, remarks, 'add');
+  const result = await saveAdvanceSalary({
+    staffId,
+    totalAmount,
+    remainingAmount,
+    remainingMonths,
+    remarks,
+    action: 'add',
+  });
   return new ApiResponse(200, result, 'Advance added successfully.').send(res);
 });
 
