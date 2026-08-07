@@ -87,8 +87,16 @@ const staffSchema = new mongoose.Schema(
       remainingAmount: Number,
       remainingMonths: Number,
       monthlyDeduction: Number,
+      dateTaken: Date,
+      startMonth: Number,
+      startYear: Number,
       remarks: String,
-      pauseTill: Date,
+      pausedMonths: [
+        {
+          month: Number,
+          year: Number,
+        },
+      ],
     },
     allowedPaidLeaves: {
       type: Number,

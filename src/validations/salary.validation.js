@@ -209,15 +209,58 @@ export const salaryStructureSchema = yup.object().shape({
   bonus_rate: yup.number().min(0).max(100).required('Bonus rate is required'),
 });
 
-export const updateAdvanceSalaryValidationSchema = yup.object().shape({
-  staffId: yup.string().test('is-mongo-id', 'Staff ID is not a valid Mongo ID', isValidObjectId),
-  totalAmount: yup.number().positive('Amount must be positive').required(),
-  remainingAmount: yup
-    .number()
-    .positive('Amount must be positive')
-    .required()
-    .max(yup.ref('totalAmount'), 'Remaining amount cannot be greater than total amount'),
-  remainingMonths: yup.number().required().min(1, 'Remaining months must be at least 1'),
-  remarks: yup.string(),
-  pauseTill: yup.date().transform((value, originalValue) => (originalValue === '' ? undefined : value)),
-});
+export const updateAdvanceSalaryValidationSchema = yup
+  .object()
+  .shape({
+    staffId: yup
+      .string()
+      .required('Staff ID is required')
+      .test('is-mongo-id', 'Staff ID is not a valid Mongo ID', isValidObjectId),
+
+    totalAmount: yup.number().positive('Amount must be positive'),
+    remainingAmount: yup
+      .number()
+      .positive('Amount must be positive')
+      .when('totalAmount', {
+        is: (val) => val !== undefined && val !== null,
+        then: (schema) => schema.max(yup.ref('totalAmount'), 'Remaining amount cannot be greater than total amount'),
+      }),
+
+    remainingMonths: yup.number().min(1, 'Remaining months must be at least 1'),
+
+    remarks: yup.string(),
+
+    startMonth: yup.number().min(1).max(12),
+    startYear: yup.number().min(2000).max(2100),
+
+    pauseMonth: yup
+      .string()
+      .matches(/^\d{4}-(0[1-9]|1[0-2])$/, 'pauseMonth must be in yyyy-MM format')
+      .transform((value, originalValue) => (originalValue === '' ? undefined : value)),
+
+    removePauseMonth: yup
+      .string()
+      .matches(/^\d{4}-(0[1-9]|1[0-2])$/, 'removePauseMonth must be in yyyy-MM format')
+      .transform((value, originalValue) => (originalValue === '' ? undefined : value)),
+  })
+
+  .test(
+    'amount-fields-together',
+    'remainingAmount and remainingMonths must be provided together when updating advance amount',
+    (obj) => {
+      const hasRemainingAmount = obj.remainingAmount !== undefined && obj.remainingAmount !== null;
+      const hasRemainingMonths = obj.remainingMonths !== undefined && obj.remainingMonths !== null;
+      return hasRemainingAmount === hasRemainingMonths;
+    }
+  )
+  .test(
+    'at-least-one-action',
+    'Provide at least one of: remainingAmount/remainingMonths, remarks, startMonth/startYear, pauseMonth, or removePauseMonth',
+    (obj) =>
+      obj.remainingAmount !== undefined ||
+      obj.remainingMonths !== undefined ||
+      obj.remarks !== undefined ||
+      obj.startMonth !== undefined ||
+      obj.pauseMonth !== undefined ||
+      obj.removePauseMonth !== undefined
+  );

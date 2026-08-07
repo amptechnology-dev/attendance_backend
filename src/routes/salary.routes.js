@@ -16,7 +16,8 @@ import {
   getAdvanceSalaryTransactions,
   getHolidayFundTransactions,
   getPastMonthSalary,
-  updateManualConveyance
+  updateManualConveyance,
+  updateManualAdvance
 } from '../controllers/salary.controller.js';
 import { adminAuth } from '../middlewares/auth.middleware.js';
 import validate from '../middlewares/validator.middleware.js';
@@ -43,5 +44,6 @@ router.route('/register/pdf/get-by-month').post(parseMonthInput, validate(monthY
 router.route('/advance-transaction/get').get(getAdvanceSalaryTransactions);
 router.route('/holiday-fund-transaction/get').get(getHolidayFundTransactions);
 router.route('/:salaryId/conveyance/update').put(updateManualConveyance);
+router.route('/:salaryId/advance/update').put(updateManualAdvance);
 
 export default router;

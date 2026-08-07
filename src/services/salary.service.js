@@ -578,31 +578,48 @@ export const saveAdvanceSalary = async ({
   totalAmount,
   remainingAmount,
   remainingMonths,
-  remarks = '',
-  pauseTill = undefined,
+  dateTaken,
+  startMonth,
+  startYear,
+  remarks,
+  pausedMonths = [],
+  pauseMonth = undefined,
+  removePauseMonth = undefined,
   action = 'update',
 }) => {
   const staff = await Staff.findById(staffId);
   if (!staff) {
-    throw new Error('Staff not found');
+    throw new ApiError(404, 'Not Found!', 'Staff not found');
   }
 
   if (action === 'add') {
     if (staff.advanceSalary && staff.advanceSalary.remainingAmount > 0) {
       throw new ApiError(400, 'Unpaid advance found!', [
-        {
-          message: 'Staff already has a pending advance. Please clear it first.',
-        },
+        { message: 'Staff already has a pending advance. Please clear it first.' },
       ]);
+    }
+    if (!startMonth || !startYear) {
+      throw new ApiError(400, 'Bad Request', 'startMonth and startYear are required.');
     }
 
     const monthlyDeduction = Math.ceil(remainingAmount / (remainingMonths || 1));
+
+    const initialPausedMonths = Array.isArray(pausedMonths)
+      ? pausedMonths.filter(Boolean).map((p) => {
+          const [y, m] = p.split('-').map(Number);
+          return { year: y, month: m };
+        })
+      : [];
 
     staff.advanceSalary = {
       totalAmount,
       remainingAmount,
       remainingMonths,
       monthlyDeduction,
+      dateTaken: dateTaken ? new Date(dateTaken) : new Date(),
+      startMonth: Number(startMonth),
+      startYear: Number(startYear),
+      pausedMonths: initialPausedMonths,
       remarks,
     };
 
@@ -614,7 +631,15 @@ export const saveAdvanceSalary = async ({
       type: 'add',
       amount: totalAmount,
       newMonths: remainingMonths,
-      remarks,
+      dateTaken: staff.advanceSalary.dateTaken,
+      startMonth: staff.advanceSalary.startMonth,
+      startYear: staff.advanceSalary.startYear,
+      month: staff.advanceSalary.startMonth,
+      year: staff.advanceSalary.startYear,
+      remarks:
+        initialPausedMonths.length > 0
+          ? `${remarks || ''} (Pre-paused: ${initialPausedMonths.map((p) => `${p.month}/${p.year}`).join(', ')})`.trim()
+          : remarks,
     });
 
     return staff.advanceSalary;
@@ -622,33 +647,51 @@ export const saveAdvanceSalary = async ({
 
   if (action === 'update') {
     if (!staff.advanceSalary) {
-      throw new ApiError(400, 'No advance found!', [
-        {
-          message: 'Staff does not have an advance.',
-        },
-      ]);
+      throw new ApiError(400, 'No advance found!', [{ message: 'Staff does not have an advance.' }]);
     }
 
     const oldRemaining = staff.advanceSalary.remainingAmount;
-
     const oldMonths = staff.advanceSalary.remainingMonths;
 
-    const updatedRemaining = Math.max(0, remainingAmount);
+    const hasAmountChange = remainingAmount !== undefined && remainingMonths !== undefined;
 
-    const updatedMonths = Math.max(0, remainingMonths);
+    if (hasAmountChange) {
+      const updatedRemaining = Math.max(0, Number(remainingAmount));
+      const updatedMonths = Math.max(0, Number(remainingMonths));
 
-    if (updatedRemaining === 0 && updatedMonths === 0) {
-      staff.advanceSalary = undefined;
-    } else {
-      staff.advanceSalary.remainingAmount = updatedRemaining;
+      if (updatedRemaining === 0 && updatedMonths === 0) {
+        staff.advanceSalary = undefined;
+      } else {
+        staff.advanceSalary.remainingAmount = updatedRemaining;
+        staff.advanceSalary.remainingMonths = updatedMonths;
+        staff.advanceSalary.monthlyDeduction = updatedMonths > 0 ? Math.ceil(updatedRemaining / updatedMonths) : 0;
+      }
+    }
 
-      staff.advanceSalary.remainingMonths = updatedMonths;
+    if (staff.advanceSalary) {
+      if (remarks !== undefined) staff.advanceSalary.remarks = remarks;
 
-      staff.advanceSalary.monthlyDeduction = updatedMonths > 0 ? Math.ceil(updatedRemaining / updatedMonths) : 0;
+      if (startMonth && startYear) {
+        staff.advanceSalary.startMonth = Number(startMonth);
+        staff.advanceSalary.startYear = Number(startYear);
+      }
 
-      staff.advanceSalary.remarks = remarks;
+      if (!staff.advanceSalary.pausedMonths) staff.advanceSalary.pausedMonths = [];
 
-      staff.advanceSalary.pauseTill = pauseTill;
+      if (pauseMonth) {
+        const [pYear, pMonth] = pauseMonth.split('-').map(Number);
+        const alreadyPaused = staff.advanceSalary.pausedMonths.some((p) => p.month === pMonth && p.year === pYear);
+        if (!alreadyPaused) {
+          staff.advanceSalary.pausedMonths.push({ month: pMonth, year: pYear });
+        }
+      }
+
+      if (removePauseMonth) {
+        const [rYear, rMonth] = removePauseMonth.split('-').map(Number);
+        staff.advanceSalary.pausedMonths = staff.advanceSalary.pausedMonths.filter(
+          (p) => !(p.month === rMonth && p.year === rYear)
+        );
+      }
     }
 
     await staff.save();
@@ -657,20 +700,24 @@ export const saveAdvanceSalary = async ({
       office: staff.office,
       staff: staffId,
       type: 'update',
-      amount: Math.abs(updatedRemaining - oldRemaining),
-      remarks,
-
+      amount: hasAmountChange ? Math.abs(Number(remainingAmount) - oldRemaining) : 0,
+      remarks:
+        remarks ||
+        (pauseMonth
+          ? `Paused deduction for ${pauseMonth}`
+          : removePauseMonth
+            ? `Un-paused deduction for ${removePauseMonth}`
+            : ''),
       previousAmount: oldRemaining,
-      newAmount: updatedRemaining,
-
+      newAmount: hasAmountChange ? Math.max(0, Number(remainingAmount)) : oldRemaining,
       previousMonths: oldMonths,
-      newMonths: updatedMonths,
+      newMonths: hasAmountChange ? Math.max(0, Number(remainingMonths)) : oldMonths,
     });
 
     return staff.advanceSalary;
   }
 
-  throw new Error(`Unsupported action type: ${action}`);
+  throw new ApiError(400, 'Bad Request', `Unsupported action type: ${action}`);
 };
 /*
 export const saveAdvanceSalary = async (staffId, totalAmount, remainingAmount, remainingMonths, remarks = '') => {
@@ -710,41 +757,70 @@ export const saveAdvanceSalary = async (staffId, totalAmount, remainingAmount, r
 // Deduct advance salary
 async function deductAdvanceSalary(staffId, month = null, year = null) {
   const staff = await Staff.findById(staffId);
-  if (!staff.advanceSalary || staff.advanceSalary.remainingMonths <= 0 || !staff.advanceSalary.remainingAmount) {
-    return 0; // No deduction needed
-  }
-  // Check if advance salary deduction is paused
-  if (staff.advanceSalary.pauseTill && new Date(year, month, 1) < staff.advanceSalary.pauseTill) {
+  const adv = staff.advanceSalary;
+
+  if (!adv || !adv.remainingAmount || adv.remainingMonths <= 0) {
     return 0;
   }
 
-  // Check if an advance salary deduction has already been made for this month
+  const currentPeriod = year * 12 + (month - 1);
+
+  if (adv.startYear && adv.startMonth) {
+    const startPeriod = adv.startYear * 12 + (adv.startMonth - 1);
+    if (currentPeriod < startPeriod) return 0;
+  }
+
+  // শুধু এই নির্দিষ্ট মাসটা paused list-এ আছে কিনা চেক করছে
+  const isPausedThisMonth = (adv.pausedMonths || []).some((p) => p.month === month && p.year === year);
+  if (isPausedThisMonth) {
+    const alreadyLogged = await AdvanceTransaction.findOne({
+      staff: staffId,
+      type: 'update',
+      month,
+      year,
+      remarks: 'Paused - deduction skipped for this month',
+    });
+    if (!alreadyLogged) {
+      try {
+        await AdvanceTransaction.create({
+          office: staff.office,
+          staff: staffId,
+          month,
+          year,
+          type: 'update',
+          amount: 0,
+          remarks: 'Paused - deduction skipped for this month',
+        });
+      } catch (error) {
+        logger.error('Error while logging paused advance month:', error);
+      }
+    }
+    return 0;
+  }
+
   const existingDeduction = await AdvanceTransaction.findOne({
     staff: staffId,
     type: 'deduct',
     month,
     year,
   });
-
   if (existingDeduction) {
-    return existingDeduction.amount; // Return the already deducted amount
+    return existingDeduction.amount;
   }
 
-  const deduction = staff.advanceSalary.monthlyDeduction;
+  const deduction = Math.min(adv.monthlyDeduction, adv.remainingAmount);
 
-  // Update remaining amount and months
-  staff.advanceSalary.remainingAmount -= deduction;
-  staff.advanceSalary.remainingMonths -= 1;
+  adv.remainingAmount -= deduction;
+  adv.remainingMonths -= 1;
 
-  // If fully paid, remove advance salary
-  if (staff.advanceSalary.remainingMonths <= 0) {
+  if (adv.remainingMonths <= 0 || adv.remainingAmount <= 0) {
     staff.advanceSalary = undefined;
   }
 
-  await staff.save(); // Save updated staff record
+  await staff.save();
 
   try {
-    AdvanceTransaction.create({
+    await AdvanceTransaction.create({
       office: staff.office,
       staff: staffId,
       month,
@@ -758,7 +834,7 @@ async function deductAdvanceSalary(staffId, month = null, year = null) {
     return 0;
   }
 
-  return deduction; // Return the deducted amount
+  return deduction;
 }
 
 function getPtax(salary) {
@@ -1560,6 +1636,70 @@ export const updateManualConveyanceForSalary = async (officeId, salaryId, convey
   )
     .populate('staff', 'fullName staffId')
     .lean();
+
+  return updatedSalary;
+};
+
+export const updateManualAdvanceForSalary = async (officeId, salaryId, newAdvanceAmount) => {
+  const salary = await Salary.findOne({ _id: salaryId, office: officeId }).lean();
+  if (!salary) throw new ApiError(404, 'Not Found!', 'Salary record not found for this office.');
+
+  const oldAdvanceAmount = salary.breakdown?.advanceDeduction ?? 0;
+  const diff = newAdvanceAmount - oldAdvanceAmount; // positive => is month e beshi advance kata hocche
+
+  if (diff === 0) {
+    return Salary.findById(salaryId).populate('staff', 'fullName staffId').lean();
+  }
+
+  const otherDeductions = (salary.deductions ?? 0) - oldAdvanceAmount;
+  let newTotalDeductions = Math.round(otherDeductions + newAdvanceAmount);
+  newTotalDeductions = Math.max(0, Math.min(newTotalDeductions, salary.grossSalary));
+  const newNetSalary = Math.round(salary.grossSalary - newTotalDeductions);
+
+  const updatedSalary = await Salary.findOneAndUpdate(
+    { _id: salaryId, office: officeId },
+    {
+      $set: {
+        'breakdown.advanceDeduction': newAdvanceAmount,
+        deductions: newTotalDeductions,
+        netSalary: newNetSalary,
+      },
+    },
+    { new: true }
+  )
+    .populate('staff', 'fullName staffId')
+    .lean();
+
+  const staff = await Staff.findById(salary.staff);
+
+  if (staff?.advanceSalary) {
+    const adv = staff.advanceSalary;
+    let updatedRemaining = adv.remainingAmount - diff;
+    updatedRemaining = Math.max(0, updatedRemaining);
+    if (adv.totalAmount) updatedRemaining = Math.min(updatedRemaining, adv.totalAmount);
+
+    adv.remainingAmount = updatedRemaining;
+
+    if (updatedRemaining <= 0) {
+      staff.advanceSalary = undefined;
+    }
+
+    await staff.save({ validateModifiedOnly: true });
+  }
+
+  await AdvanceTransaction.create({
+    office: officeId,
+    staff: salary.staff,
+    month: salary.month,
+    year: salary.year,
+    type: 'update',
+    amount: Math.abs(diff),
+    previousAmount: oldAdvanceAmount,
+    newAmount: newAdvanceAmount,
+    remarks: `Manual advance adjustment on ${salary.month}/${salary.year} payslip${
+      !staff?.advanceSalary ? ' (no active advance record on staff — payslip only)' : ''
+    }`,
+  });
 
   return updatedSalary;
 };

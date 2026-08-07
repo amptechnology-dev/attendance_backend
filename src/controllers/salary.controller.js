@@ -10,6 +10,7 @@ import {
   getSalaryTableByMonth,
   generateSalaryRegisterPdf,
   updateManualConveyanceForSalary,
+  updateManualAdvanceForSalary,
 } from '../services/salary.service.js';
 import { AdvanceTransaction } from '../models/salary.model.js';
 import { HolidayFund } from '../models/holidayFund.model.js';
@@ -90,12 +91,31 @@ export const putSalaryStructure = expressAsyncHandler(async (req, res) => {
 });
 
 export const addAdvanceSalary = expressAsyncHandler(async (req, res) => {
-  const { staffId, totalAmount, remainingAmount, remainingMonths, remarks } = req.body;
+  const {
+    staffId,
+    totalAmount,
+    remainingAmount,
+    remainingMonths,
+    dateTaken,
+    startMonth,
+    startYear,
+    pausedMonths,
+    remarks,
+  } = req.body;
+
+  if (!startMonth || !startYear) {
+    return new ApiResponse(400, null, 'Deduction start month and year are required.').send(res);
+  }
+
   const result = await saveAdvanceSalary({
     staffId,
     totalAmount,
     remainingAmount,
     remainingMonths,
+    dateTaken,
+    startMonth,
+    startYear,
+    pausedMonths,
     remarks,
     action: 'add',
   });
@@ -103,22 +123,42 @@ export const addAdvanceSalary = expressAsyncHandler(async (req, res) => {
 });
 
 export const updateAdvanceSalary = expressAsyncHandler(async (req, res) => {
-  const { staffId, totalAmount, remainingAmount, remainingMonths, remarks, pauseTill } = req.body;
-  const result = await saveAdvanceSalary(
+  const {
     staffId,
     totalAmount,
     remainingAmount,
     remainingMonths,
     remarks,
-    pauseTill,
-    'update'
-  );
+    startMonth,
+    startYear,
+    pauseMonth,
+    removePauseMonth,
+  } = req.body;
+
+  const result = await saveAdvanceSalary({
+    staffId,
+    totalAmount,
+    remainingAmount,
+    remainingMonths,
+    remarks,
+    startMonth,
+    startYear,
+    pauseMonth,
+    removePauseMonth,
+    action: 'update',
+  });
   return new ApiResponse(200, result, 'Advance updated successfully.').send(res);
 });
 
 export const markAdvanceAsPaid = expressAsyncHandler(async (req, res) => {
   const { staffId, remarks = 'Marked as fully paid' } = req.body;
-  const result = await saveAdvanceSalary(staffId, 0, 0, 0, remarks, 'update');
+  const result = await saveAdvanceSalary({
+    staffId,
+    remainingAmount: 0,
+    remainingMonths: 0,
+    remarks,
+    action: 'update',
+  });
   return new ApiResponse(200, result, 'Advance marked as fully paid.').send(res);
 });
 
@@ -314,6 +354,22 @@ export const updateManualConveyance = expressAsyncHandler(async (req, res) => {
   const updatedSalary = await updateManualConveyanceForSalary(req.admin.office, salaryId, Number(amount));
 
   return new ApiResponse(200, updatedSalary, 'Conveyance updated and salary breakdown recalculated successfully.').send(
+    res
+  );
+});
+
+// Update manual advance deduction on a payslip
+export const updateManualAdvance = expressAsyncHandler(async (req, res) => {
+  const { salaryId } = req.params;
+  const { amount } = req.body;
+
+  if (amount === undefined || isNaN(amount) || amount < 0) {
+    throw new ApiError(400, 'Bad Request', 'A valid non-negative advance amount is required.');
+  }
+
+  const updatedSalary = await updateManualAdvanceForSalary(req.admin.office, salaryId, Number(amount));
+
+  return new ApiResponse(200, updatedSalary, 'Advance updated and salary breakdown recalculated successfully.').send(
     res
   );
 });

@@ -200,37 +200,22 @@ const SalaryStructureShema = new mongoose.Schema(
 
 const AdvanceTransactionSchema = new mongoose.Schema(
   {
-    office: {
-      type: mongoose.Schema.Types.ObjectId,
-      ref: 'Office',
-      required: true,
-    },
-    staff: {
-      type: mongoose.Schema.Types.ObjectId,
-      ref: 'Staff',
-      required: true,
-    },
+    office: { type: mongoose.Schema.Types.ObjectId, ref: 'Office', required: true },
+    staff: { type: mongoose.Schema.Types.ObjectId, ref: 'Staff', required: true },
     month: Number,
     year: Number,
-    amount: {
-      type: Number,
-      required: true,
-    },
-    type: {
-      type: String,
-      enum: ['add', 'deduct', 'update'],
-      required: true,
-    },
-    // Exclusive fields for 'update' only
+    amount: { type: Number, required: true },
+    type: { type: String, enum: ['add', 'deduct', 'update'], required: true },
+    dateTaken: Date,
+    startMonth: Number,
+    startYear: Number,
     previousAmount: Number,
     newAmount: Number,
     previousMonths: Number,
     newMonths: Number,
     remarks: String,
   },
-  {
-    timestamps: true,
-  }
+  { timestamps: true }
 );
 
 SalarySchema.index({ office: 1, staff: 1, month: 1, year: 1 });
