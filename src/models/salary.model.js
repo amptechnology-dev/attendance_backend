@@ -192,6 +192,11 @@ const SalaryStructureShema = new mongoose.Schema(
       wageCeiling: { type: Number, default: 15000 },
       fixedAmount: { type: Number, default: 25 },
     },
+    overtime: {
+      enabled: { type: Boolean, default: false },
+      slotMinutes: { type: Number, enum: [30, 60, 90, 120], default: 30 }, 
+      multiplier: { type: Number, default: 1.5, min: 0.1 }, 
+    },
 
     bonus_rate: { type: Number, default: 8.33 },
   },

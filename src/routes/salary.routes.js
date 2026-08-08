@@ -19,6 +19,7 @@ import {
   updateManualConveyance,
   updateManualAdvance
 } from '../controllers/salary.controller.js';
+import {getOvertimeReportByMonth, applyOvertimeForStaff} from '../controllers/overtime.controller.js';
 import { adminAuth } from '../middlewares/auth.middleware.js';
 import validate from '../middlewares/validator.middleware.js';
 import { parseMonthInput } from '../middlewares/bodyParser.middleware.js';
@@ -45,5 +46,7 @@ router.route('/advance-transaction/get').get(getAdvanceSalaryTransactions);
 router.route('/holiday-fund-transaction/get').get(getHolidayFundTransactions);
 router.route('/:salaryId/conveyance/update').put(updateManualConveyance);
 router.route('/:salaryId/advance/update').put(updateManualAdvance);
+router.route('/overtime/report').get(getOvertimeReportByMonth);
+router.route('/overtime/apply').post(applyOvertimeForStaff);
 
 export default router;

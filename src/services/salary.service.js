@@ -378,9 +378,6 @@ const autoCalculateAllSalaryByMonth = async (officeId, month, year) => {
 
         unsetFields['breakdown.bonus'] = '';
 
-        if (overtimeHours > 0) setFields['breakdown.overtime'] = overtimePay;
-        else unsetFields['breakdown.overtime'] = '';
-
         if (advanceDeduction > 0) setFields['breakdown.advanceDeduction'] = advanceDeduction;
         else unsetFields['breakdown.advanceDeduction'] = '';
 
@@ -955,6 +952,10 @@ export const generateSalaryPdf = async (officeId, staffId, month, year) => {
   // Always shown — real schema field with a default, not a toggle.
   columnDefs.push({ header: 'ADV.', getValue: (s) => safeToFixed(s.breakdown?.advanceDeduction) });
 
+  if (salaryStructure.overtime?.enabled) {
+    columnDefs.push({ header: 'OT', getValue: (s) => safeToFixed(s.breakdown?.overtime) });
+  }
+
   columnDefs.push({ header: 'TD', getValue: (s) => safeToFixed(s.deductions) });
 
   columnDefs.push({ header: 'Net Amt.', getValue: (s) => s.netSalary });
@@ -1075,6 +1076,10 @@ export const generateSalaryByMonth = async (officeId, month, year) => {
   }
 
   columnDefs.push({ header: 'ADV.', getValue: (s) => safeToFixed(s.breakdown?.advanceDeduction) });
+
+  if (salaryStructure.overtime?.enabled) {
+  columnDefs.push({ header: 'OT', getValue: (s) => safeToFixed(s.breakdown?.overtime) });
+}
 
   columnDefs.push({ header: 'TD', getValue: (s) => safeToFixed(s.deductions) });
 
@@ -1419,6 +1424,9 @@ export const getSalaryTableByMonth = async (officeId, month, year, filters = {})
   }
 
   columnDefs.push({ header: 'LESS ADVANCE', key: 'lessAdvance', summable: true });
+  if(salaryStructure.overtime?.enabled) {
+    columnDefs.push({ header: 'OT', key: 'overtime', summable: true });
+  }
   columnDefs.push({ header: 'TD', key: 'td', summable: true });
   columnDefs.push({ header: 'NET', key: 'net', summable: true });
 
@@ -1449,6 +1457,7 @@ export const getSalaryTableByMonth = async (officeId, month, year, filters = {})
       lwf: round2(s.breakdown?.lwf),
       lessAdvance: round2(s.breakdown?.advanceDeduction),
       td: round2(s.deductions),
+      overtime: round2(s.breakdown?.overtime),
       net: s.netSalary,
     };
   });
@@ -1548,6 +1557,9 @@ export const generateSalaryRegisterPdf = async (officeId, month, year, filters =
   }
 
   columnDefs.push({ header: 'ADV.', getValue: (s) => safeToFixed(s.breakdown?.advanceDeduction) });
+  if (salaryStructure.overtime?.enabled) {
+  columnDefs.push({ header: 'OT', getValue: (s) => safeToFixed(s.breakdown?.overtime) });
+}
   columnDefs.push({ header: 'TD', getValue: (s) => safeToFixed(s.deductions) });
   columnDefs.push({ header: 'Net Amt.', getValue: (s) => s.netSalary });
 

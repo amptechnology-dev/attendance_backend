@@ -31,6 +31,7 @@ export const putSalaryStructure = expressAsyncHandler(async (req, res) => {
     esi,
     pTax,
     lwf,
+    overtime,
     bonus_rate,
   } = req.body;
 
@@ -66,6 +67,14 @@ export const putSalaryStructure = expressAsyncHandler(async (req, res) => {
   if (lwf?.enabled && (lwf.wageCeiling < 0 || lwf.fixedAmount < 0)) {
     return new ApiResponse(400, null, 'lwf.wageCeiling and lwf.fixedAmount must be non-negative.').send(res);
   }
+  if (overtime?.enabled) {
+    if (![30, 60].includes(Number(overtime.slotMinutes))) {
+      return new ApiResponse(400, null, 'overtime.slotMinutes must be 30 or 60.').send(res);
+    }
+    if (overtime.multiplier === undefined || Number(overtime.multiplier) <= 0) {
+      return new ApiResponse(400, null, 'overtime.multiplier must be a positive number.').send(res);
+    }
+  }
 
   const updatedSalaryStructure = await SalaryStructure.findOneAndUpdate(
     { office: req.admin.office },
@@ -82,6 +91,7 @@ export const putSalaryStructure = expressAsyncHandler(async (req, res) => {
       esi,
       pTax,
       lwf,
+      overtime,
       bonus_rate,
     },
     { upsert: true, new: true, runValidators: true, setDefaultsOnInsert: true }
