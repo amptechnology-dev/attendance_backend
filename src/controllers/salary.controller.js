@@ -1,7 +1,7 @@
 import expressAsyncHandler from 'express-async-handler';
 import { ApiResponse, ApiError } from '../utils/responseHandler.js';
 import { SalaryStructure, Salary } from '../models/salary.model.js';
-import { autoCalculateAllSalary } from '../services/salary.service.js';
+import { autoCalculateAllSalary,freezeSalary } from '../services/salary.service.js';
 import {
   saveAdvanceSalary,
   generateSalaryPdf,
@@ -17,6 +17,7 @@ import { HolidayFund } from '../models/holidayFund.model.js';
 import { Office } from '../models/office.model.js';
 import { getCurrentDate } from '../utils/dateTime.utils.js';
 import { startOfMonth, subMonths } from 'date-fns';
+import { requestSalaryUnfreezeOtp, verifySalaryUnfreezeOtp } from '../services/salary.service.js';
 
 export const putSalaryStructure = expressAsyncHandler(async (req, res) => {
   const {
@@ -382,4 +383,31 @@ export const updateManualAdvance = expressAsyncHandler(async (req, res) => {
   return new ApiResponse(200, updatedSalary, 'Advance updated and salary breakdown recalculated successfully.').send(
     res
   );
+});
+
+export const freezeSalaryForMonth = expressAsyncHandler(async (req, res) => {
+  const { month, year } = req.body;
+  if (!month || !year) {
+    throw new ApiError(400, 'Bad Request', 'month and year are required.');
+  }
+  const data = await freezeSalary(req.admin.office, parseInt(month), parseInt(year), req.admin._id);
+  return new ApiResponse(200, data, 'Salary frozen successfully.').send(res);
+});
+
+export const requestUnfreezeOtp = expressAsyncHandler(async (req, res) => {
+  const { month, year } = req.body;
+  if (!month || !year) {
+    throw new ApiError(400, 'Bad Request', 'month and year are required.');
+  }
+  const data = await requestSalaryUnfreezeOtp(req.admin.office, req.admin._id, parseInt(month), parseInt(year));
+  return new ApiResponse(200, data, 'OTP sent to your registered mobile number.').send(res);
+});
+
+export const confirmUnfreeze = expressAsyncHandler(async (req, res) => {
+  const { month, year, otp } = req.body;
+  if (!month || !year || !otp) {
+    throw new ApiError(400, 'Bad Request', 'month, year and otp are required.');
+  }
+  const data = await verifySalaryUnfreezeOtp(req.admin.office, req.admin._id, parseInt(month), parseInt(year), otp);
+  return new ApiResponse(200, data, 'Salary unfrozen successfully.').send(res);
 });

@@ -1,19 +1,19 @@
 import { Overtime } from '../models/overtime.model.js';
 import { SalaryStructure, Salary } from '../models/salary.model.js';
+import { SalaryCalculation } from '../models/salaryCalculation.model.js';
+import { assertSalaryNotLocked } from './salary.service.js';
 import { Staff } from '../models/staff.model.js';
 import { Attendance } from '../models/attendance.model.js';
 import { DutyTiming } from '../models/dutyTiming.model.js';
 import { Holiday } from '../models/holiday.model.js';
-import { WeekOff } from '../models/weekOff.model.js';
 import { getMonthBoundariesFormatted } from '../utils/dateTime.utils.js';
 import { getDaysInMonth, format } from 'date-fns';
 import { ApiError } from '../utils/responseHandler.js';
 import logger from '../config/logger.js';
 
-
 const computeSlots = (exitTime, dutyEndDateTime, slotMinutes) => {
   const diffMinutes = (new Date(exitTime) - new Date(dutyEndDateTime)) / (1000 * 60);
-  if (diffMinutes < slotMinutes) return 0; 
+  if (diffMinutes < slotMinutes) return 0;
   return Math.floor(diffMinutes / slotMinutes);
 };
 
@@ -25,14 +25,30 @@ export const getOvertimeReport = async (officeId, month, year) => {
   const { slotMinutes } = structure.overtime;
   const { startDate, endDate } = getMonthBoundariesFormatted(month, year);
 
+  const lock = await SalaryCalculation.findOne({ office: officeId, month, year }).lean();
+  const locked = Boolean(lock?.locked);
+
+  const salaryRecords = await Salary.find({ office: officeId, month, year }).select('staff').lean();
+  const calculatedStaffIds = new Set(salaryRecords.map((s) => String(s.staff)));
+
+  if (!calculatedStaffIds.size) {
+    throw new ApiError(
+      400,
+      'Bad Request',
+      'Salary is not calculated on that month. 1st calculate salary then put overtime.'
+    );
+  }
+
   const [staffList, appliedList] = await Promise.all([
-    Staff.find({ office: officeId, status: 'active' }).populate('department', 'name').lean(),
+    Staff.find({ office: officeId, status: 'active', _id: { $in: [...calculatedStaffIds] } })
+      .populate('department', 'name')
+      .lean(),
     Overtime.find({ office: officeId, month, year }).lean(),
   ]);
   const appliedMap = new Map(appliedList.map((o) => [String(o.staff), o]));
 
   const dutyTimingCache = new Map();
-  const dayTypeCache = new Map(); // `${dateStr}::${deptId}` -> 'holiday' | 'week-off'
+  const dayTypeCache = new Map();
   const grouped = {};
 
   for (const staff of staffList) {
@@ -44,8 +60,10 @@ export const getOvertimeReport = async (officeId, month, year) => {
     const dutyTiming = dutyTimingCache.get(deptId);
     if (!dutyTiming) continue;
 
-    // Criteria 1: Normal full-day (auto slot calc)
-    // Criteria 2: WeekOff/Holiday-তে P অথবা HD (manual slot input candidate)
+    // আগে থেকে apply করা entries — date wise lookup এর জন্য map
+    const applied = appliedMap.get(String(staff._id));
+    const appliedEntriesMap = new Map((applied?.entries || []).map((e) => [e.date, e]));
+
     const attendances = await Attendance.find({
       office: officeId,
       staffId: staff._id,
@@ -80,7 +98,6 @@ export const getOvertimeReport = async (officeId, month, year) => {
       const exitTime = lastExit?.exitTime || null;
 
       if (att.isOffDayWork) {
-        // Criteria 4: WeekOff/Holiday-তে P/HD — manual input, dayType label (WO/Holiday) সহ
         const cacheKey = `${dateStr}::${deptId}`;
         if (!dayTypeCache.has(cacheKey)) {
           const isHoliday = await Holiday.findOne({
@@ -90,30 +107,40 @@ export const getOvertimeReport = async (officeId, month, year) => {
           }).lean();
           dayTypeCache.set(cacheKey, isHoliday ? 'holiday' : 'week-off');
         }
+
+        const appliedEntry = appliedEntriesMap.get(dateStr);
         dates.push({
           date: dateStr,
-          slots: 0,
+          slots: appliedEntry ? appliedEntry.slots : 0,
           source: 'manual',
           editable: true,
-          dayType: dayTypeCache.get(cacheKey), // 'holiday' | 'week-off'
+          dayType: dayTypeCache.get(cacheKey),
           entryTime,
           exitTime,
+          alreadyApplied: Boolean(appliedEntry),
         });
         continue;
       }
 
-      // Criteria 1: normal working day — duty-end এর পর কমপ্লিট slot না হলে বাদ
       if (!lastExit) continue;
       const dutyEnd = new Date(`${dateStr}T${dutyTiming.endTime}+05:30`);
       const slots = computeSlots(lastExit.exitTime, dutyEnd, slotMinutes);
       if (slots > 0) {
-        dates.push({ date: dateStr, slots, source: 'auto', editable: false, dayType: null, entryTime, exitTime });
+        dates.push({
+          date: dateStr,
+          slots,
+          source: 'auto',
+          editable: false,
+          dayType: null,
+          entryTime,
+          exitTime,
+          alreadyApplied: appliedEntriesMap.has(dateStr),
+        });
       }
     }
 
     if (!dates.length) continue;
 
-    const applied = appliedMap.get(String(staff._id));
     const departmentName = staff.department?.name || 'Unassigned';
 
     if (!grouped[departmentName]) grouped[departmentName] = [];
@@ -128,10 +155,16 @@ export const getOvertimeReport = async (officeId, month, year) => {
     });
   }
 
-  return Object.entries(grouped).map(([departmentName, staff]) => ({ departmentName, staff }));
+  return {
+    locked,
+    departments: Object.entries(grouped).map(([departmentName, staff]) => ({ departmentName, staff })),
+  };
 };
 
 export const applyOvertime = async (officeId, month, year, adminId, selections) => {
+  // Freeze হয়ে গেলে overtime apply করা যাবে না
+  await assertSalaryNotLocked(officeId, month, year);
+
   const structure = await SalaryStructure.findOne({ office: officeId }).lean();
   if (!structure?.overtime?.enabled) {
     throw new ApiError(400, 'Bad Request', 'Overtime is not enabled in Salary Structure settings.');

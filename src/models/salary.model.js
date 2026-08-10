@@ -21,17 +21,13 @@ const SalarySchema = new mongoose.Schema(
       required: true,
     },
     baseSalary: {
-      type: Number, //  Staff's monthlySalary
+      type: Number,
       required: true,
     },
     totalPayableDays: {
-      type: Number, // Calculated: total days of month
+      type: Number,
       required: true,
     },
-    // totalWorkingDays: {
-    //   type: Number, // Calculated: total days  - holidays - weekoffs in the month
-    //   required: true,
-    // },
     attendanceDetails: {
       totalFullDays: { type: Number, default: 0 },
       totalHalfDays: { type: Number, default: 0 },
@@ -61,27 +57,27 @@ const SalarySchema = new mongoose.Schema(
       advanceDeduction: { type: Number, default: 0 },
     },
     totalPayableDays: {
-      type: Number, // Calculated: total days of month
+      type: Number,
       required: true,
     },
     workedDays: {
-      type: Number, // display-only: totalFullDays + forgivenHalfDays + extraHalfDays*0.5 — excludes Week-Off
+      type: Number,
       default: 0,
     },
     paidDays: {
-      type: Number, // Calculated: totalFullDays + forgiven-half-days - unpaid-extra-half-days
+      type: Number,
       default: 0,
     },
     deductions: {
       type: Number,
-      default: 0, // Any additional deductions
+      default: 0,
     },
     grossSalary: {
-      type: Number, // Calculated: base_salary + overtime_pay + bonuses
+      type: Number,
       required: true,
     },
     netSalary: {
-      type: Number, // Calculated: gross_salary - deductions
+      type: Number,
       required: true,
     },
     status: {
@@ -129,7 +125,7 @@ const SalaryStructureShema = new mongoose.Schema(
 
     da: {
       enabled: { type: Boolean, default: false },
-      percentage: { type: Number, default: 0, min: 0, max: 100 }, // % of Basic
+      percentage: { type: Number, default: 0, min: 0, max: 100 },
     },
 
     hra: {
@@ -146,10 +142,10 @@ const SalaryStructureShema = new mongoose.Schema(
       enabled: { type: Boolean, default: false },
       mode: {
         type: String,
-        enum: ['input', 'readonly'], // input = manual value/month, readonly = % auto-calculated
+        enum: ['input', 'readonly'],
         default: 'input',
       },
-      percentage: { type: Number, default: 0, min: 0, max: 100 }, // used only when mode === 'readonly'
+      percentage: { type: Number, default: 0, min: 0, max: 100 },
     },
 
     specialAllowance: {
@@ -194,8 +190,8 @@ const SalaryStructureShema = new mongoose.Schema(
     },
     overtime: {
       enabled: { type: Boolean, default: false },
-      slotMinutes: { type: Number, enum: [30, 60, 90, 120], default: 30 }, 
-      multiplier: { type: Number, default: 1.5, min: 0.1 }, 
+      slotMinutes: { type: Number, default: 30 },
+      multiplier: { type: Number, default: 1.5, min: 0.1 },
     },
 
     bonus_rate: { type: Number, default: 8.33 },

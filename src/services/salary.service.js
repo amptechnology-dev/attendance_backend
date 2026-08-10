@@ -14,6 +14,107 @@ import { HolidayFund } from '../models/holidayFund.model.js';
 import { Office } from '../models/office.model.js';
 import { getMonthBoundariesFormatted } from '../utils/dateTime.utils.js';
 import { ApiError } from '../utils/responseHandler.js';
+import { Admin } from '../models/admin.model.js';
+import axios from 'axios';
+
+export const assertSalaryNotLocked = async (officeId, month, year) => {
+  const lock = await SalaryCalculation.findOne({ office: officeId, month, year, locked: true });
+  if (lock) {
+    throw new ApiError(400, 'Bad Request', `Salary for ${month}/${year} is frozen. No further changes allowed.`);
+  }
+};
+
+export const freezeSalary = async (officeId, month, year, adminId) => {
+  const salaryExists = await Salary.exists({ office: officeId, month, year });
+  if (!salaryExists) {
+    throw new ApiError(400, 'Bad Request', 'Cannot freeze salary before it has been calculated for this month.');
+  }
+  const lock = await SalaryCalculation.findOneAndUpdate(
+    { office: officeId, month, year },
+    { office: officeId, month, year, locked: true, calculatedBy: adminId },
+    { upsert: true, new: true }
+  );
+  return lock;
+};
+
+export const getSalaryFreezeStatus = async (officeId, month, year) => {
+  const lock = await SalaryCalculation.findOne({ office: officeId, month, year }).lean();
+  return { locked: Boolean(lock?.locked) };
+};
+
+const sendUnfreezeOtpSms = async (mobile, otp, officeId) => {
+  const message = `${otp} is your OTP to unfreeze salary in AMP Attendance. Please do not share this OTP with anyone.- AMPTECH`;
+  const params = {
+    username: 'MTECHTRANS',
+    apikey: '38892-B2424',
+    apirequest: 'Text',
+    sender: 'AMPTCH',
+    mobile,
+    message,
+    route: 'TRANS',
+    TemplateID: '1407172715834228636',
+    format: 'JSON',
+  };
+  const smsResponse = await axios.get('http://text.mboxsolution.com/sms-panel/api/http/index.php', { params });
+  await Office.updateOne({ _id: officeId }, { $inc: { smsCount: 1 } });
+  if (smsResponse.data.status !== 'success') {
+    console.error('Failed to send unfreeze OTP SMS:', smsResponse.data);
+    throw new ApiError(500, 'Failed to send SMS.', [{ message: 'Failed to send SMS' }]);
+  }
+};
+
+export const requestSalaryUnfreezeOtp = async (officeId, adminId, month, year) => {
+  const lock = await SalaryCalculation.findOne({ office: officeId, month, year });
+  if (!lock?.locked) {
+    throw new ApiError(400, 'Bad Request', `Salary for ${month}/${year} is not frozen.`);
+  }
+
+  const admin = await Admin.findById(adminId);
+  if (!admin) throw new ApiError(404, 'Not Found!', 'Admin not found.');
+
+  const otp = Math.floor(100000 + Math.random() * 900000);
+  admin.otp = otp;
+  admin.otpExpires = Date.now() + 5 * 60 * 1000; // 5 min
+  admin.otpPurpose = 'unfreeze';
+  admin.otpContext = `${month}:${year}`;
+  await admin.save();
+
+  await sendUnfreezeOtpSms(admin.mobile, otp, officeId);
+
+  return { mobile: admin.mobile };
+};
+
+export const verifySalaryUnfreezeOtp = async (officeId, adminId, month, year, otp) => {
+  const admin = await Admin.findById(adminId);
+  if (!admin) throw new ApiError(404, 'Not Found!', 'Admin not found.');
+
+  const isValid =
+    admin.otpPurpose === 'unfreeze' &&
+    admin.otpContext === `${month}:${year}` &&
+    admin.otp &&
+    admin.otp == otp &&
+    admin.otpExpires &&
+    admin.otpExpires > Date.now();
+
+  if (!isValid) {
+    throw new ApiError(400, 'Bad Request', 'Invalid or expired OTP.');
+  }
+
+  admin.otp = null;
+  admin.otpExpires = null;
+  admin.otpPurpose = undefined;
+  admin.otpContext = undefined;
+  await admin.save();
+
+  const lock = await SalaryCalculation.findOneAndUpdate(
+    { office: officeId, month, year },
+    { locked: false },
+    { new: true }
+  );
+  if (!lock) throw new ApiError(404, 'Not Found!', 'Salary lock record not found for this month.');
+
+  return lock;
+};
 
 let calculationStatus = {};
 
@@ -53,6 +154,10 @@ const autoCalculateAllSalaryByMonth = async (officeId, month, year) => {
       year,
       locked: true,
     });
+
+    if (alreadyCalculated) {
+      throw new ApiError(400, 'Bad Request', `Salary for ${month}/${year} is frozen. Recalculation is not allowed.`);
+    }
 
     const salaryStructure = await SalaryStructure.findOne({ office: officeId });
     if (!salaryStructure) throw new Error('Salary configuration not found.');
@@ -397,7 +502,10 @@ const autoCalculateAllSalaryByMonth = async (officeId, month, year) => {
     return results;
   } catch (error) {
     logger.error('Error while auto calculating salary:', error);
-    throw new Error(error);
+    if (error instanceof ApiError) {
+      throw error; 
+    }
+    throw new Error(error.message || 'Failed to calculate salary.');
   }
 };
 /*
@@ -587,6 +695,18 @@ export const saveAdvanceSalary = async ({
   const staff = await Staff.findById(staffId);
   if (!staff) {
     throw new ApiError(404, 'Not Found!', 'Staff not found');
+  }
+
+  const lockMonth =
+    startMonth ||
+    (pauseMonth ? Number(pauseMonth.split('-')[1]) : null) ||
+    (removePauseMonth ? Number(removePauseMonth.split('-')[1]) : null);
+  const lockYear =
+    startYear ||
+    (pauseMonth ? Number(pauseMonth.split('-')[0]) : null) ||
+    (removePauseMonth ? Number(removePauseMonth.split('-')[0]) : null);
+  if (lockMonth && lockYear) {
+    await assertSalaryNotLocked(staff.office, Number(lockMonth), Number(lockYear));
   }
 
   if (action === 'add') {
@@ -1078,8 +1198,8 @@ export const generateSalaryByMonth = async (officeId, month, year) => {
   columnDefs.push({ header: 'ADV.', getValue: (s) => safeToFixed(s.breakdown?.advanceDeduction) });
 
   if (salaryStructure.overtime?.enabled) {
-  columnDefs.push({ header: 'OT', getValue: (s) => safeToFixed(s.breakdown?.overtime) });
-}
+    columnDefs.push({ header: 'OT', getValue: (s) => safeToFixed(s.breakdown?.overtime) });
+  }
 
   columnDefs.push({ header: 'TD', getValue: (s) => safeToFixed(s.deductions) });
 
@@ -1424,7 +1544,7 @@ export const getSalaryTableByMonth = async (officeId, month, year, filters = {})
   }
 
   columnDefs.push({ header: 'LESS ADVANCE', key: 'lessAdvance', summable: true });
-  if(salaryStructure.overtime?.enabled) {
+  if (salaryStructure.overtime?.enabled) {
     columnDefs.push({ header: 'OT', key: 'overtime', summable: true });
   }
   columnDefs.push({ header: 'TD', key: 'td', summable: true });
@@ -1558,8 +1678,8 @@ export const generateSalaryRegisterPdf = async (officeId, month, year, filters =
 
   columnDefs.push({ header: 'ADV.', getValue: (s) => safeToFixed(s.breakdown?.advanceDeduction) });
   if (salaryStructure.overtime?.enabled) {
-  columnDefs.push({ header: 'OT', getValue: (s) => safeToFixed(s.breakdown?.overtime) });
-}
+    columnDefs.push({ header: 'OT', getValue: (s) => safeToFixed(s.breakdown?.overtime) });
+  }
   columnDefs.push({ header: 'TD', getValue: (s) => safeToFixed(s.deductions) });
   columnDefs.push({ header: 'Net Amt.', getValue: (s) => s.netSalary });
 
@@ -1635,7 +1755,7 @@ export const updateManualConveyanceForSalary = async (officeId, salaryId, convey
 
   const salary = await Salary.findOne({ _id: salaryId, office: officeId });
   if (!salary) throw new ApiError(404, 'Not Found!', 'Salary record not found for this office.');
-
+  await assertSalaryNotLocked(officeId, salary.month, salary.year);
   const updatedSalary = await Salary.findOneAndUpdate(
     { _id: salaryId, office: officeId },
     {
@@ -1655,19 +1775,16 @@ export const updateManualConveyanceForSalary = async (officeId, salaryId, convey
 export const updateManualAdvanceForSalary = async (officeId, salaryId, newAdvanceAmount) => {
   const salary = await Salary.findOne({ _id: salaryId, office: officeId }).lean();
   if (!salary) throw new ApiError(404, 'Not Found!', 'Salary record not found for this office.');
-
+  await assertSalaryNotLocked(officeId, salary.month, salary.year);
   const oldAdvanceAmount = salary.breakdown?.advanceDeduction ?? 0;
   const diff = newAdvanceAmount - oldAdvanceAmount; // positive => is month e beshi advance kata hocche
-
   if (diff === 0) {
     return Salary.findById(salaryId).populate('staff', 'fullName staffId').lean();
   }
-
   const otherDeductions = (salary.deductions ?? 0) - oldAdvanceAmount;
   let newTotalDeductions = Math.round(otherDeductions + newAdvanceAmount);
   newTotalDeductions = Math.max(0, Math.min(newTotalDeductions, salary.grossSalary));
   const newNetSalary = Math.round(salary.grossSalary - newTotalDeductions);
-
   const updatedSalary = await Salary.findOneAndUpdate(
     { _id: salaryId, office: officeId },
     {

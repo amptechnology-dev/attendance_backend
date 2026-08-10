@@ -17,7 +17,10 @@ import {
   getHolidayFundTransactions,
   getPastMonthSalary,
   updateManualConveyance,
-  updateManualAdvance
+  updateManualAdvance,
+  freezeSalaryForMonth,
+  confirmUnfreeze,
+  requestUnfreezeOtp
 } from '../controllers/salary.controller.js';
 import {getOvertimeReportByMonth, applyOvertimeForStaff} from '../controllers/overtime.controller.js';
 import { adminAuth } from '../middlewares/auth.middleware.js';
@@ -48,5 +51,8 @@ router.route('/:salaryId/conveyance/update').put(updateManualConveyance);
 router.route('/:salaryId/advance/update').put(updateManualAdvance);
 router.route('/overtime/report').get(getOvertimeReportByMonth);
 router.route('/overtime/apply').post(applyOvertimeForStaff);
+router.route('/freeze').post(freezeSalaryForMonth);
+router.route('/unfreeze/request-otp').post(requestUnfreezeOtp);
+router.route('/unfreeze/confirm').post(confirmUnfreeze);
 
 export default router;
