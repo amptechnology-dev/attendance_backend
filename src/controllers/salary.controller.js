@@ -18,6 +18,8 @@ import { Office } from '../models/office.model.js';
 import { getCurrentDate } from '../utils/dateTime.utils.js';
 import { startOfMonth, subMonths } from 'date-fns';
 import { requestSalaryUnfreezeOtp, verifySalaryUnfreezeOtp } from '../services/salary.service.js';
+import { validateBonusConfig } from '../services/bonus.service.js';
+
 
 export const putSalaryStructure = expressAsyncHandler(async (req, res) => {
   const {
@@ -33,7 +35,7 @@ export const putSalaryStructure = expressAsyncHandler(async (req, res) => {
     pTax,
     lwf,
     overtime,
-    bonus_rate,
+    bonus,
   } = req.body;
 
   // ---- Minimal but important validation (avoids garbage % values reaching payroll calc) ----
@@ -77,6 +79,9 @@ export const putSalaryStructure = expressAsyncHandler(async (req, res) => {
     }
   }
 
+  // Throws ApiError internally if invalid — caught by expressAsyncHandler's error forwarding
+  validateBonusConfig(bonus);
+
   const updatedSalaryStructure = await SalaryStructure.findOneAndUpdate(
     { office: req.admin.office },
     {
@@ -93,7 +98,7 @@ export const putSalaryStructure = expressAsyncHandler(async (req, res) => {
       pTax,
       lwf,
       overtime,
-      bonus_rate,
+      bonus,
     },
     { upsert: true, new: true, runValidators: true, setDefaultsOnInsert: true }
   );

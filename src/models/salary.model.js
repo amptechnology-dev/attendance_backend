@@ -194,7 +194,22 @@ const SalaryStructureShema = new mongoose.Schema(
       multiplier: { type: Number, default: 1.5, min: 0.1 },
     },
 
-    bonus_rate: { type: Number, default: 8.33 },
+    bonus: {
+      mode: {
+        type: String,
+        enum: ['manual', 'auto'],
+        default: 'manual',
+      },
+      rules: [
+        {
+          lastMonth: { type: Number, required: true, min: 1, max: 12 },
+          lastYear: { type: Number, required: true },
+          backMonths: { type: Number, required: true, min: 1 },
+          minTenureMonths: { type: Number, required: true, min: 0, default: 0 },
+          percentage: { type: Number, required: true, min: 0, max: 100 },
+        },
+      ],
+    },
   },
   { timestamps: true }
 );
@@ -219,9 +234,30 @@ const AdvanceTransactionSchema = new mongoose.Schema(
   { timestamps: true }
 );
 
+const BonusSchema = new mongoose.Schema(
+  {
+    office: { type: mongoose.Schema.Types.ObjectId, ref: 'Office', required: true },
+    staff: { type: mongoose.Schema.Types.ObjectId, ref: 'Staff', required: true },
+    month: { type: Number, required: true },
+    year: { type: Number, required: true },
+    mode: { type: String, enum: ['manual', 'auto'], required: true },
+    amount: { type: Number, required: true, default: 0 },
+    percentage: { type: Number, default: 0 },
+    backMonths: { type: Number, default: 0 },
+    minTenureMonths: { type: Number, default: 0 },
+    baseNetSalarySum: { type: Number, default: 0 },
+    monthsCounted: { type: Number, default: 0 },
+    remarks: String,
+  },
+  { timestamps: true }
+);
+
+BonusSchema.index({ office: 1, staff: 1, month: 1, year: 1 }, { unique: true });
+BonusSchema.index({ office: 1, month: 1, year: 1, mode: 1 });
 SalarySchema.index({ office: 1, staff: 1, month: 1, year: 1 });
 AdvanceTransactionSchema.index({ staff: 1, month: 1, year: 1 });
 
 export const SalaryStructure = mongoose.model('SalaryStructure', SalaryStructureShema);
 export const AdvanceTransaction = mongoose.model('AdvanceTransaction', AdvanceTransactionSchema);
 export const Salary = mongoose.model('Salary', SalarySchema);
+export const Bonus = mongoose.model('Bonus', BonusSchema);

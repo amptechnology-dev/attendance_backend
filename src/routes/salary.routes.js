@@ -20,9 +20,16 @@ import {
   updateManualAdvance,
   freezeSalaryForMonth,
   confirmUnfreeze,
-  requestUnfreezeOtp
+  requestUnfreezeOtp,
 } from '../controllers/salary.controller.js';
-import {getOvertimeReportByMonth, applyOvertimeForStaff} from '../controllers/overtime.controller.js';
+import {
+  getBonusSettingMonthsList,
+  getBonusRegisterByMonth,
+  saveManualBonus,
+  getBonusRegisterPdf,
+  getBonusRegisterExcel,
+} from '../controllers/bonus.controller.js';
+import { getOvertimeReportByMonth, applyOvertimeForStaff } from '../controllers/overtime.controller.js';
 import { adminAuth } from '../middlewares/auth.middleware.js';
 import validate from '../middlewares/validator.middleware.js';
 import { parseMonthInput } from '../middlewares/bodyParser.middleware.js';
@@ -44,7 +51,9 @@ router.route('/slip/get-by-staff').post(parseMonthInput, validate(monthYearSchem
 router.route('/slip/get-by-month').post(parseMonthInput, validate(monthYearSchema), getSalaryPdfByMonth);
 router.route('/excel/get-by-month').post(parseMonthInput, validate(monthYearSchema), getSalaryExcelByMonth);
 router.route('/table/get-by-month').post(parseMonthInput, validate(monthYearSchema), getSalaryTablesByMonth);
-router.route('/register/pdf/get-by-month').post(parseMonthInput, validate(monthYearSchema), getSalaryRegisterPdfByMonth);
+router
+  .route('/register/pdf/get-by-month')
+  .post(parseMonthInput, validate(monthYearSchema), getSalaryRegisterPdfByMonth);
 router.route('/advance-transaction/get').get(getAdvanceSalaryTransactions);
 router.route('/holiday-fund-transaction/get').get(getHolidayFundTransactions);
 router.route('/:salaryId/conveyance/update').put(updateManualConveyance);
@@ -54,5 +63,13 @@ router.route('/overtime/apply').post(applyOvertimeForStaff);
 router.route('/freeze').post(freezeSalaryForMonth);
 router.route('/unfreeze/request-otp').post(requestUnfreezeOtp);
 router.route('/unfreeze/confirm').post(confirmUnfreeze);
+
+// ---------- Bonus ----------
+router.route('/bonus/settings-months').get(getBonusSettingMonthsList);
+router.route('/bonus/register').get(getBonusRegisterByMonth);
+router.route('/bonus/manual').post(parseMonthInput, validate(monthYearSchema), saveManualBonus);
+
+router.route('/bonus/register/pdf').post(parseMonthInput, validate(monthYearSchema), getBonusRegisterPdf);
+router.route('/bonus/register/excel').post(parseMonthInput, validate(monthYearSchema), getBonusRegisterExcel);
 
 export default router;
