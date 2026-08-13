@@ -1,3 +1,4 @@
+import mongoose from 'mongoose';
 import { Salary, SalaryStructure, Bonus } from '../models/salary.model.js';
 import { Staff } from '../models/staff.model.js';
 import { SalaryCalculation } from '../models/salaryCalculation.model.js';
@@ -6,11 +7,10 @@ import { assertSalaryNotLocked } from './salary.service.js';
 import { jsPDF } from 'jspdf';
 import autoTable from 'jspdf-autotable';
 import ExcelJS from 'exceljs';
-import { format } from 'date-fns';
 import { Office } from '../models/office.model.js';
 
 const round2 = (v) => Math.round((Number(v) || 0) * 100) / 100;
-
+const MONTH_SHORT = ['Jan', 'Feb', 'Mar', 'Apr', 'May', 'Jun', 'Jul', 'Aug', 'Sep', 'Oct', 'Nov', 'Dec'];
 
 const getPeriodMonths = (lastMonth, lastYear, backMonths) => {
   const months = [];
@@ -25,6 +25,15 @@ const getPeriodMonths = (lastMonth, lastYear, backMonths) => {
     }
   }
   return months;
+};
+
+const formatPeriodLabel = (periodMonths) => {
+  if (!periodMonths?.length) return '';
+  const short = (m, y) => `${MONTH_SHORT[m - 1]}'${String(y).slice(-2)}`;
+  if (periodMonths.length === 1) return short(periodMonths[0].month, periodMonths[0].year);
+  const first = periodMonths[0];
+  const last = periodMonths[periodMonths.length - 1];
+  return `${short(first.month, first.year)} - ${short(last.month, last.year)}`;
 };
 
 const getTenureInMonths = (dateOfJoining, lastMonth, lastYear) => {
@@ -71,14 +80,22 @@ export const validateBonusConfig = (bonusConfig) => {
   }
 };
 
-// Months configured under auto mode — used to restrict the register page's month picker
+// Auto mode dropdown — each entry now carries a human-readable range label (e.g. "Jan'26 - Aug'26")
 export const getBonusSettingMonths = async (officeId) => {
   const structure = await SalaryStructure.findOne({ office: officeId }).lean();
   if (!structure) throw new ApiError(404, 'Not Found!', 'Salary configuration not found for this office.');
   if (structure.bonus?.mode !== 'auto') return [];
 
   return (structure.bonus.rules || [])
-    .map((r) => ({ month: r.lastMonth, year: r.lastYear }))
+    .map((r) => {
+      const periodMonths = getPeriodMonths(r.lastMonth, r.lastYear, r.backMonths);
+      return {
+        month: r.lastMonth,
+        year: r.lastYear,
+        backMonths: r.backMonths,
+        label: formatPeriodLabel(periodMonths),
+      };
+    })
     .sort((a, b) => a.year - b.year || a.month - b.month);
 };
 
@@ -97,12 +114,10 @@ export const calculateAutoBonusForMonth = async (officeId, month, year) => {
   }
 
   const periodMonths = getPeriodMonths(rule.lastMonth, rule.lastYear, rule.backMonths);
-  // Last day of the earliest period month — used as the "must be joined before this" cutoff
   const periodStart = new Date(periodMonths[0].year, periodMonths[0].month - 1, 1);
 
   const staffList = await Staff.find({
     office: officeId,
-    // dateOfJoining must be on/before the last day of the rule's lastMonth
     dateOfJoining: { $lte: new Date(rule.lastYear, rule.lastMonth, 0) },
     $or: [{ dateOfLeaving: null }, { dateOfLeaving: { $exists: false } }, { dateOfLeaving: { $gte: periodStart } }],
   }).lean();
@@ -122,7 +137,6 @@ export const calculateAutoBonusForMonth = async (officeId, month, year) => {
 
     if (!salaries.length) continue;
 
-    // Bonus is calculated on net salary BEFORE advance deduction was subtracted
     const baseNetSalarySum = salaries.reduce((sum, s) => {
       const netBeforeAdvance = (s.netSalary || 0) + (s.breakdown?.advanceDeduction || 0);
       return sum + netBeforeAdvance;
@@ -147,20 +161,25 @@ export const calculateAutoBonusForMonth = async (officeId, month, year) => {
     eligibleStaffIds.push(staff._id);
   }
 
-  // Drop stale auto bonus records for staff who are no longer eligible (e.g. rule was edited)
+  const tenurePassedStaffIds = staffList
+    .filter((s) => getTenureInMonths(s.dateOfJoining, rule.lastMonth, rule.lastYear) >= rule.minTenureMonths)
+    .map((s) => s._id);
+
   await Bonus.deleteMany({
     office: officeId,
     month: rule.lastMonth,
     year: rule.lastYear,
     mode: 'auto',
-    staff: { $nin: eligibleStaffIds },
+    staff: { $nin: tenurePassedStaffIds },
   });
 };
 
-const groupByDepartment = async (records) => {
+// Groups bonus records by department, computes per-department subtotal and grand total.
+// Uses staff.staffId (the human-readable code) instead of Mongo _id for display.
+const groupByDepartmentWithTotals = async (records) => {
   const staffIds = records.map((r) => r.staff);
   const staffList = await Staff.find({ _id: { $in: staffIds } })
-    .select('fullName department')
+    .select('fullName staffId department')
     .populate('department', 'name')
     .lean();
 
@@ -174,6 +193,7 @@ const groupByDepartment = async (records) => {
     if (!groups.has(deptName)) groups.set(deptName, []);
     groups.get(deptName).push({
       staffId: staff._id,
+      staffCode: staff.staffId || '-',
       staffName: staff.fullName,
       amount: r.amount,
       baseNetSalarySum: r.baseNetSalarySum,
@@ -183,7 +203,16 @@ const groupByDepartment = async (records) => {
     });
   });
 
-  return Array.from(groups.entries()).map(([departmentName, staff]) => ({ departmentName, staff }));
+  let grandTotal = 0;
+  const departments = Array.from(groups.entries())
+    .map(([departmentName, staff]) => {
+      const departmentTotal = round2(staff.reduce((sum, s) => sum + (Number(s.amount) || 0), 0));
+      grandTotal += departmentTotal;
+      return { departmentName, staff, departmentTotal };
+    })
+    .sort((a, b) => a.departmentName.localeCompare(b.departmentName));
+
+  return { departments, grandTotal: round2(grandTotal) };
 };
 
 export const getBonusRegister = async (officeId, month, year) => {
@@ -195,38 +224,88 @@ export const getBonusRegister = async (officeId, month, year) => {
 
   if (structure.bonus?.mode === 'auto') {
     await calculateAutoBonusForMonth(officeId, month, year);
+    const rule = (structure.bonus.rules || []).find(
+      (r) => r.lastMonth === Number(month) && r.lastYear === Number(year)
+    );
     const records = await Bonus.find({ office: officeId, month, year, mode: 'auto' }).lean();
-    const departments = await groupByDepartment(records);
-    return { mode: 'auto', locked, departments };
+    const { departments, grandTotal } = await groupByDepartmentWithTotals(records);
+    const label = rule ? formatPeriodLabel(getPeriodMonths(rule.lastMonth, rule.lastYear, rule.backMonths)) : '';
+    return { mode: 'auto', locked, label, departments, grandTotal };
   }
 
-  // Manual mode: show every active staff, department wise, prefilled with any saved amount
-  const staffList = await Staff.find({ office: officeId, status: 'active' })
-    .select('fullName department')
+  // Manual mode: register view shows whatever has already been generated & saved for this month/year
+  const records = await Bonus.find({ office: officeId, month, year, mode: 'manual' }).lean();
+  if (!records.length) {
+    return { mode: 'manual', locked, label: '', departments: [], grandTotal: 0 };
+  }
+  const backMonths = records[0].backMonths || 1;
+  const label = formatPeriodLabel(getPeriodMonths(Number(month), Number(year), backMonths));
+  const { departments, grandTotal } = await groupByDepartmentWithTotals(records);
+  return { mode: 'manual', locked, label, departments, grandTotal };
+};
+
+// Manual mode — "Generate Bonus" step: given an end month/year + backMonths (i.e. a date range like
+// Jan-Aug) + minTenureMonths, returns eligible staff (joined before/within the range, tenure-qualified),
+// department wise, prefilled with any amount already saved for this exact range.
+export const getManualBonusRangeStaff = async (officeId, month, year, backMonths, minTenureMonths) => {
+  const structure = await SalaryStructure.findOne({ office: officeId }).lean();
+  if (!structure) throw new ApiError(404, 'Not Found!', 'Salary configuration not found for this office.');
+  if (structure.bonus?.mode !== 'manual') {
+    throw new ApiError(400, 'Bad Request', 'Bonus mode is not set to "manual" for this office.');
+  }
+  if (!month || !year || !backMonths || backMonths < 1) {
+    throw new ApiError(400, 'Bad Request', 'month, year and backMonths are required.');
+  }
+
+  const tenureMin = Number(minTenureMonths) || 0;
+  const periodMonths = getPeriodMonths(Number(month), Number(year), Number(backMonths));
+  const periodStart = new Date(periodMonths[0].year, periodMonths[0].month - 1, 1);
+
+  const staffList = await Staff.find({
+    office: officeId,
+    status: 'active',
+    dateOfJoining: { $lte: new Date(Number(year), Number(month), 0) },
+    $or: [{ dateOfLeaving: null }, { dateOfLeaving: { $exists: false } }, { dateOfLeaving: { $gte: periodStart } }],
+  })
+    .select('fullName staffId department dateOfJoining')
     .populate('department', 'name')
     .lean();
 
-  const existing = await Bonus.find({ office: officeId, month, year, mode: 'manual' }).lean();
+  const eligibleStaff = staffList.filter(
+    (s) => getTenureInMonths(s.dateOfJoining, Number(month), Number(year)) >= tenureMin
+  );
+
+  const existing = await Bonus.find({
+    office: officeId,
+    month: Number(month),
+    year: Number(year),
+    mode: 'manual',
+    backMonths: Number(backMonths),
+  }).lean();
   const existingMap = new Map(existing.map((e) => [String(e.staff), e]));
 
   const groups = new Map();
-  staffList.forEach((staff) => {
+  eligibleStaff.forEach((staff) => {
     const deptName = staff.department?.name || 'Unassigned';
     if (!groups.has(deptName)) groups.set(deptName, []);
     const entry = existingMap.get(String(staff._id));
     groups.get(deptName).push({
       staffId: staff._id,
+      staffCode: staff.staffId || '-',
       staffName: staff.fullName,
       amount: entry?.amount ?? 0,
       remarks: entry?.remarks || '',
     });
   });
 
-  const departments = Array.from(groups.entries()).map(([departmentName, staff]) => ({ departmentName, staff }));
-  return { mode: 'manual', locked, departments };
+  const departments = Array.from(groups.entries())
+    .map(([departmentName, staff]) => ({ departmentName, staff }))
+    .sort((a, b) => a.departmentName.localeCompare(b.departmentName));
+
+  return { departments, label: formatPeriodLabel(periodMonths) };
 };
 
-export const saveManualBonusEntries = async (officeId, month, year, entries) => {
+export const saveManualBonusEntries = async (officeId, month, year, backMonths, minTenureMonths, entries) => {
   const structure = await SalaryStructure.findOne({ office: officeId }).lean();
   if (!structure) throw new ApiError(404, 'Not Found!', 'Salary configuration not found for this office.');
   if (structure.bonus?.mode !== 'manual') {
@@ -234,6 +313,9 @@ export const saveManualBonusEntries = async (officeId, month, year, entries) => 
   }
   if (!Array.isArray(entries) || !entries.length) {
     throw new ApiError(400, 'Bad Request', 'entries array is required.');
+  }
+  if (!backMonths || backMonths < 1) {
+    throw new ApiError(400, 'Bad Request', 'backMonths (derived from the selected date range) is required.');
   }
 
   await assertSalaryNotLocked(officeId, month, year);
@@ -244,7 +326,13 @@ export const saveManualBonusEntries = async (officeId, month, year, entries) => 
     const amount = Number(entry.amount) || 0;
     const updated = await Bonus.findOneAndUpdate(
       { office: officeId, staff: entry.staffId, month, year },
-      { mode: 'manual', amount, remarks: entry.remarks || '' },
+      {
+        mode: 'manual',
+        amount,
+        backMonths: Number(backMonths),
+        minTenureMonths: Number(minTenureMonths) || 0,
+        remarks: entry.remarks || '',
+      },
       { upsert: true, new: true }
     );
     results.push(updated);
@@ -264,10 +352,8 @@ const safeToFixed = (value, decimals = 2) => {
   return Number(value).toFixed(decimals);
 };
 
-const formatJoiningDate = (date) => (date ? format(new Date(date), 'dd-MM-yyyy') : '-');
-
-// Builds the flat, sorted (department -> name) row list shared by both PDF and Excel exports.
-const buildBonusRegisterRows = async (officeId, month, year) => {
+// Shared data builder for PDF/Excel — department grouped, with subtotal + grand total + range label.
+const buildBonusRegisterData = async (officeId, month, year) => {
   const structure = await SalaryStructure.findOne({ office: officeId }).lean();
   if (!structure) throw new ApiError(404, 'Not Found!', 'Salary configuration not found for this office.');
 
@@ -275,82 +361,85 @@ const buildBonusRegisterRows = async (officeId, month, year) => {
     await calculateAutoBonusForMonth(officeId, month, year);
   }
 
-  const bonusRecords = await Bonus.find({ office: officeId, month, year, mode: structure.bonus?.mode }).lean();
+  const records = await Bonus.find({ office: officeId, month, year, mode: structure.bonus?.mode }).lean();
+  const filteredRecords = structure.bonus?.mode === 'auto' ? records.filter((r) => r.amount > 0) : records;
 
-  let staffList;
-  if (structure.bonus?.mode === 'auto') {
-    const eligibleStaffIds = bonusRecords.filter((b) => b.amount > 0).map((b) => b.staff);
-    staffList = await Staff.find({ _id: { $in: eligibleStaffIds } })
-      .select('fullName department dateOfJoining')
-      .populate('department', 'name')
-      .lean();
-  } else {
-    staffList = await Staff.find({ office: officeId, status: 'active' })
-      .select('fullName department dateOfJoining')
-      .populate('department', 'name')
-      .lean();
-  }
-
-  const bonusByStaff = new Map(bonusRecords.map((b) => [String(b.staff), b]));
-
-  const rows = staffList
-    .map((staff) => {
-      const bonus = bonusByStaff.get(String(staff._id));
-      return {
-        staffName: staff.fullName,
-        departmentName: staff.department?.name || 'Unassigned',
-        dateOfJoining: staff.dateOfJoining,
-        amount: bonus?.amount ?? 0,
-      };
-    })
-    .filter((r) => structure.bonus?.mode === 'auto' ? r.amount > 0 : true)
-    .sort((a, b) => a.departmentName.localeCompare(b.departmentName) || a.staffName.localeCompare(b.staffName));
-
-  const office = await Office.findById(officeId).select('name').lean();
-
-  return { rows, officeName: office?.name || '', mode: structure.bonus?.mode || 'manual' };
-};
-
-export const generateBonusRegisterPdf = async (officeId, month, year) => {
-  const { rows, officeName } = await buildBonusRegisterRows(officeId, month, year);
-  if (!rows.length) {
+  if (!filteredRecords.length) {
     throw new ApiError(404, 'Not Found!', 'No bonus records found for the given month.');
   }
 
-  const doc = new jsPDF({ format: 'a4', orientation: 'l' });
+  const { departments, grandTotal } = await groupByDepartmentWithTotals(filteredRecords);
+
+  let label = '';
+  if (structure.bonus?.mode === 'auto') {
+    const rule = (structure.bonus.rules || []).find(
+      (r) => r.lastMonth === Number(month) && r.lastYear === Number(year)
+    );
+    if (rule) label = formatPeriodLabel(getPeriodMonths(rule.lastMonth, rule.lastYear, rule.backMonths));
+  } else {
+    const backMonths = filteredRecords[0].backMonths || 1;
+    label = formatPeriodLabel(getPeriodMonths(Number(month), Number(year), backMonths));
+  }
+
+  const office = await Office.findById(officeId).select('name').lean();
+
+  return { departments, grandTotal, label, officeName: office?.name || '' };
+};
+
+export const generateBonusRegisterPdf = async (officeId, month, year) => {
+  const { departments, grandTotal, label, officeName } = await buildBonusRegisterData(officeId, month, year);
+
+  const doc = new jsPDF({ format: 'a4', orientation: 'p' });
   const pageWidth = doc.internal.pageSize.width || doc.internal.pageSize.getWidth();
   const pageHeight = doc.internal.pageSize.height || doc.internal.pageSize.getHeight();
 
   doc.setFont('times', 'bold');
   doc.setFontSize(14);
-  doc.text(`BONUS REGISTER — ${format(new Date(year, month - 1), 'MMMM').toUpperCase()} ${year}`, pageWidth / 2, 10, {
-    align: 'center',
-  });
+  doc.text('BONUS REGISTER', pageWidth / 2, 10, { align: 'center' });
   doc.setFontSize(10);
   doc.text(officeName, pageWidth / 2, 15, { align: 'center' });
+  doc.setFontSize(9);
+  doc.text(`Period: ${label}`, pageWidth / 2, 20, { align: 'center' });
 
-  const headers = [['SL NO', 'NAME', 'DEPARTMENT', 'DATE OF JOINING', 'AMOUNT', 'RECEIVED DATE', 'SIGNATURE']];
-  const body = rows.map((r, i) => [
-    i + 1,
-    r.staffName,
-    r.departmentName,
-    formatJoiningDate(r.dateOfJoining),
-    safeToFixed(r.amount),
-    '',
-    '',
+  const headers = [['SL', 'STAFF ID', 'NAME', 'AMOUNT', 'SIGNATURE']];
+  const body = [];
+
+  departments.forEach((dept) => {
+    body.push([
+      {
+        content: dept.departmentName.toUpperCase(),
+        colSpan: 5,
+        styles: { fillColor: [230, 230, 230], fontStyle: 'bold', halign: 'left' },
+      },
+    ]);
+    dept.staff.forEach((s, i) => {
+      body.push([i + 1, s.staffCode, s.staffName, safeToFixed(s.amount), '']);
+    });
+    body.push([
+      { content: 'Department Total', colSpan: 3, styles: { fontStyle: 'bold', halign: 'right' } },
+      { content: safeToFixed(dept.departmentTotal), styles: { fontStyle: 'bold' } },
+      '',
+    ]);
+  });
+
+  body.push([
+    {
+      content: 'GRAND TOTAL',
+      colSpan: 3,
+      styles: { fontStyle: 'bold', halign: 'right', fillColor: [46, 134, 171], textColor: [255, 255, 255] },
+    },
+    { content: safeToFixed(grandTotal), styles: { fontStyle: 'bold', fillColor: [46, 134, 171], textColor: [255, 255, 255] } },
+    { content: '', styles: { fillColor: [46, 134, 171] } },
   ]);
 
   autoTable(doc, {
-    startY: 20,
+    startY: 25,
     head: headers,
     body,
     theme: 'grid',
     styles: { fontSize: 9, cellPadding: 2 },
     headStyles: { fillColor: [46, 134, 171], fontSize: 9 },
-    columnStyles: {
-      5: { minCellWidth: 35 },
-      6: { minCellWidth: 35 },
-    },
+    columnStyles: { 4: { minCellWidth: 30 } },
     showHead: 'everyPage',
     didDrawPage: (data) => {
       doc.setFontSize(8);
@@ -365,27 +454,14 @@ export const generateBonusRegisterPdf = async (officeId, month, year) => {
 };
 
 export const generateBonusRegisterExcel = async (officeId, month, year) => {
-  const { rows, officeName } = await buildBonusRegisterRows(officeId, month, year);
-  if (!rows.length) {
-    throw new ApiError(404, 'Not Found!', 'No bonus records found for the given month.');
-  }
-
-  const columnDefs = [
-    { header: 'SL NO', key: 'slNo', width: 8 },
-    { header: 'NAME', key: 'name', width: 24 },
-    { header: 'DEPARTMENT', key: 'department', width: 18 },
-    { header: 'DATE OF JOINING', key: 'doj', width: 16 },
-    { header: 'AMOUNT', key: 'amount', width: 12, sum: true },
-    { header: 'RECEIVED DATE', key: 'receivedDate', width: 16 },
-    { header: 'SIGNATURE', key: 'signature', width: 18 },
-  ];
+  const { departments, grandTotal, label, officeName } = await buildBonusRegisterData(officeId, month, year);
 
   const workbook = new ExcelJS.Workbook();
   const sheet = workbook.addWorksheet('Bonus Register');
-  const colCount = columnDefs.length;
-
-  columnDefs.forEach((col, idx) => {
-    sheet.getColumn(idx + 1).width = col.width;
+  const colCount = 5;
+  const colWidths = [6, 14, 26, 14, 20];
+  colWidths.forEach((w, idx) => {
+    sheet.getColumn(idx + 1).width = w;
   });
 
   sheet.mergeCells(1, 1, 1, colCount);
@@ -398,78 +474,90 @@ export const generateBonusRegisterExcel = async (officeId, month, year) => {
 
   sheet.mergeCells(2, 1, 2, colCount);
   const subtitleCell = sheet.getCell(2, 1);
-  const monthLabel = format(new Date(year, month - 1), 'MMMM').toUpperCase();
-  subtitleCell.value = `BONUS REGISTER ${monthLabel}'${String(year).slice(-2)}`;
+  subtitleCell.value = `BONUS REGISTER (${label})`;
   subtitleCell.font = { bold: true, size: 10, color: { argb: 'FFFFFFFF' } };
   subtitleCell.alignment = { horizontal: 'center', vertical: 'middle' };
   subtitleCell.fill = { type: 'pattern', pattern: 'solid', fgColor: { argb: 'FF2E86AB' } };
   sheet.getRow(2).height = 16;
 
-  const headerRow = sheet.getRow(3);
-  columnDefs.forEach((col, idx) => {
-    const cell = headerRow.getCell(idx + 1);
-    cell.value = col.header;
-    cell.font = { bold: true, size: 9, color: { argb: 'FFFFFFFF' } };
-    cell.alignment = { horizontal: 'center', vertical: 'middle', wrapText: true };
-    cell.fill = { type: 'pattern', pattern: 'solid', fgColor: { argb: 'FF2E86AB' } };
-    cell.border = thinBorder;
-  });
-  headerRow.height = 24;
+  let rowIndex = 3;
+  const headers = ['SL', 'STAFF ID', 'NAME', 'AMOUNT', 'SIGNATURE'];
 
-  const firstDataRow = 4;
-  let rowIndex = firstDataRow;
+  departments.forEach((dept) => {
+    sheet.mergeCells(rowIndex, 1, rowIndex, colCount);
+    const deptCell = sheet.getCell(rowIndex, 1);
+    deptCell.value = dept.departmentName.toUpperCase();
+    deptCell.font = { bold: true, size: 10 };
+    deptCell.fill = { type: 'pattern', pattern: 'solid', fgColor: { argb: 'FFE6E6E6' } };
+    deptCell.border = thinBorder;
+    sheet.getRow(rowIndex).height = 18;
+    rowIndex++;
 
-  rows.forEach((r, i) => {
-    const rowData = {
-      slNo: i + 1,
-      name: r.staffName,
-      department: r.departmentName,
-      doj: formatJoiningDate(r.dateOfJoining),
-      amount: Math.round((Number(r.amount) || 0) * 100) / 100,
-      receivedDate: '',
-      signature: '',
-    };
-
-    const row = sheet.getRow(rowIndex);
-    columnDefs.forEach((col, idx) => {
-      const cell = row.getCell(idx + 1);
-      cell.value = rowData[col.key];
-      cell.font = { size: 9 };
+    const headerRow = sheet.getRow(rowIndex);
+    headers.forEach((h, idx) => {
+      const cell = headerRow.getCell(idx + 1);
+      cell.value = h;
+      cell.font = { bold: true, size: 9, color: { argb: 'FFFFFFFF' } };
+      cell.alignment = { horizontal: 'center', vertical: 'middle' };
+      cell.fill = { type: 'pattern', pattern: 'solid', fgColor: { argb: 'FF2E86AB' } };
       cell.border = thinBorder;
-      cell.alignment = { horizontal: ['name', 'department'].includes(col.key) ? 'left' : 'center' };
     });
-    row.height = 22;
+    headerRow.height = 20;
+    rowIndex++;
+
+    const firstStaffRow = rowIndex;
+    dept.staff.forEach((s, i) => {
+      const row = sheet.getRow(rowIndex);
+      const rowData = [i + 1, s.staffCode, s.staffName, round2(s.amount), ''];
+      rowData.forEach((val, idx) => {
+        const cell = row.getCell(idx + 1);
+        cell.value = val;
+        cell.font = { size: 9 };
+        cell.border = thinBorder;
+        cell.alignment = { horizontal: idx === 2 ? 'left' : 'center' };
+      });
+      row.height = 20;
+      rowIndex++;
+    });
+    const lastStaffRow = rowIndex - 1;
+
+    sheet.mergeCells(rowIndex, 1, rowIndex, 3);
+    const totalLabelCell = sheet.getCell(rowIndex, 1);
+    totalLabelCell.value = 'Department Total';
+    totalLabelCell.font = { bold: true, size: 9 };
+    totalLabelCell.alignment = { horizontal: 'right' };
+    totalLabelCell.border = thinBorder;
+
+    const totalAmountCell = sheet.getCell(rowIndex, 4);
+    totalAmountCell.value = { formula: `SUM(D${firstStaffRow}:D${lastStaffRow})` };
+    totalAmountCell.font = { bold: true, size: 9 };
+    totalAmountCell.alignment = { horizontal: 'center' };
+    totalAmountCell.border = thinBorder;
+
+    sheet.getCell(rowIndex, 5).border = thinBorder;
+    sheet.getRow(rowIndex).height = 18;
     rowIndex++;
   });
 
-  const lastDataRow = rowIndex - 1;
-
-  const totalRow = sheet.getRow(rowIndex);
   sheet.mergeCells(rowIndex, 1, rowIndex, 3);
+  const grandLabelCell = sheet.getCell(rowIndex, 1);
+  grandLabelCell.value = 'GRAND TOTAL';
+  grandLabelCell.font = { bold: true, size: 10, color: { argb: 'FFFFFFFF' } };
+  grandLabelCell.alignment = { horizontal: 'right', vertical: 'middle' };
+  grandLabelCell.fill = { type: 'pattern', pattern: 'solid', fgColor: { argb: 'FF2E86AB' } };
+  grandLabelCell.border = thinBorder;
 
-  const totalLabelCell = totalRow.getCell(1);
-  totalLabelCell.value = 'TOTAL';
-  totalLabelCell.font = { bold: true, color: { argb: 'FFFFFFFF' } };
-  totalLabelCell.alignment = { horizontal: 'center', vertical: 'middle' };
-  totalLabelCell.fill = { type: 'pattern', pattern: 'solid', fgColor: { argb: 'FF2E86AB' } };
-  totalLabelCell.border = thinBorder;
+  const grandAmountCell = sheet.getCell(rowIndex, 4);
+  grandAmountCell.value = round2(grandTotal);
+  grandAmountCell.font = { bold: true, size: 10, color: { argb: 'FFFFFFFF' } };
+  grandAmountCell.alignment = { horizontal: 'center' };
+  grandAmountCell.fill = { type: 'pattern', pattern: 'solid', fgColor: { argb: 'FF2E86AB' } };
+  grandAmountCell.border = thinBorder;
 
-  columnDefs.forEach((col, idx) => {
-    if (idx < 3) return;
-    const cell = totalRow.getCell(idx + 1);
-    const colLetter = sheet.getColumn(idx + 1).letter;
-
-    if (col.sum) {
-      cell.value = { formula: `SUM(${colLetter}${firstDataRow}:${colLetter}${lastDataRow})` };
-    } else {
-      cell.value = '';
-    }
-    cell.font = { bold: true, size: 9, color: { argb: 'FFFFFFFF' } };
-    cell.alignment = { horizontal: 'center' };
-    cell.fill = { type: 'pattern', pattern: 'solid', fgColor: { argb: 'FF2E86AB' } };
-    cell.border = thinBorder;
-  });
-  totalRow.height = 18;
+  const grandSigCell = sheet.getCell(rowIndex, 5);
+  grandSigCell.fill = { type: 'pattern', pattern: 'solid', fgColor: { argb: 'FF2E86AB' } };
+  grandSigCell.border = thinBorder;
+  sheet.getRow(rowIndex).height = 20;
 
   return workbook.xlsx.writeBuffer();
 };

@@ -4,8 +4,9 @@ import {
   getBonusSettingMonths,
   getBonusRegister,
   saveManualBonusEntries,
-  generateBonusRegisterPdf, 
-  generateBonusRegisterExcel
+  getManualBonusRangeStaff,
+  generateBonusRegisterPdf,
+  generateBonusRegisterExcel,
 } from '../services/bonus.service.js';
 
 export const getBonusSettingMonthsList = expressAsyncHandler(async (req, res) => {
@@ -22,9 +23,31 @@ export const getBonusRegisterByMonth = expressAsyncHandler(async (req, res) => {
   return new ApiResponse(200, data, 'Bonus register fetched successfully.').send(res);
 });
 
+export const getManualBonusStaffListHandler = expressAsyncHandler(async (req, res) => {
+  const { month, year, backMonths, minTenureMonths } = req.query;
+  if (!month || !year || !backMonths) {
+    throw new ApiError(400, 'Bad Request', 'month, year and backMonths are required.');
+  }
+  const data = await getManualBonusRangeStaff(
+    req.admin.office,
+    parseInt(month),
+    parseInt(year),
+    parseInt(backMonths),
+    minTenureMonths ? parseInt(minTenureMonths) : 0
+  );
+  return new ApiResponse(200, data, 'Eligible staff list fetched successfully.').send(res);
+});
+
 export const saveManualBonus = expressAsyncHandler(async (req, res) => {
-  const { month, year, entries } = req.body;
-  const data = await saveManualBonusEntries(req.admin.office, month, year, entries);
+  const { month, year, backMonths, minTenureMonths, entries } = req.body;
+  const data = await saveManualBonusEntries(
+    req.admin.office,
+    month,
+    year,
+    backMonths,
+    minTenureMonths,
+    entries
+  );
   return new ApiResponse(200, data, 'Bonus saved successfully.').send(res);
 });
 

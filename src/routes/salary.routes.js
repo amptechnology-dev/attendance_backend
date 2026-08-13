@@ -21,11 +21,13 @@ import {
   freezeSalaryForMonth,
   confirmUnfreeze,
   requestUnfreezeOtp,
+  getFreezeStatus,
 } from '../controllers/salary.controller.js';
 import {
   getBonusSettingMonthsList,
   getBonusRegisterByMonth,
   saveManualBonus,
+  getManualBonusStaffListHandler,
   getBonusRegisterPdf,
   getBonusRegisterExcel,
 } from '../controllers/bonus.controller.js';
@@ -63,13 +65,14 @@ router.route('/overtime/apply').post(applyOvertimeForStaff);
 router.route('/freeze').post(freezeSalaryForMonth);
 router.route('/unfreeze/request-otp').post(requestUnfreezeOtp);
 router.route('/unfreeze/confirm').post(confirmUnfreeze);
+router.route('/freeze-status').get(getFreezeStatus);
 
 // ---------- Bonus ----------
 router.route('/bonus/settings-months').get(getBonusSettingMonthsList);
 router.route('/bonus/register').get(getBonusRegisterByMonth);
-router.route('/bonus/manual').post(parseMonthInput, validate(monthYearSchema), saveManualBonus);
-
-router.route('/bonus/register/pdf').post(parseMonthInput, validate(monthYearSchema), getBonusRegisterPdf);
-router.route('/bonus/register/excel').post(parseMonthInput, validate(monthYearSchema), getBonusRegisterExcel);
+router.route('/bonus/manual/staff-list').get(getManualBonusStaffListHandler);
+router.route('/bonus/manual').post(saveManualBonus);
+router.route('/bonus/register/pdf').post(getBonusRegisterPdf);
+router.route('/bonus/register/excel').post(getBonusRegisterExcel);
 
 export default router;

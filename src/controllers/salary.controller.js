@@ -11,6 +11,7 @@ import {
   generateSalaryRegisterPdf,
   updateManualConveyanceForSalary,
   updateManualAdvanceForSalary,
+  getSalaryFreezeStatus
 } from '../services/salary.service.js';
 import { AdvanceTransaction } from '../models/salary.model.js';
 import { HolidayFund } from '../models/holidayFund.model.js';
@@ -415,4 +416,13 @@ export const confirmUnfreeze = expressAsyncHandler(async (req, res) => {
   }
   const data = await verifySalaryUnfreezeOtp(req.admin.office, req.admin._id, parseInt(month), parseInt(year), otp);
   return new ApiResponse(200, data, 'Salary unfrozen successfully.').send(res);
+});
+
+export const getFreezeStatus = expressAsyncHandler(async (req, res) => {
+  const { month, year } = req.query;
+  if (!month || !year) {
+    throw new ApiError(400, 'Bad Request', 'month and year are required.');
+  }
+  const data = await getSalaryFreezeStatus(req.admin.office, parseInt(month), parseInt(year));
+  return new ApiResponse(200, data, 'Freeze status fetched successfully.').send(res);
 });
