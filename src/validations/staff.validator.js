@@ -39,15 +39,9 @@ export const staffValidationSchema = yup
     aadhaarNo: yup.string(),
     // .length(12, 'Aadhaar number must be 12 digits'),
     // .required('Aadhaar number is required'),
-    monthlySalary: yup
-      .number()
-      .positive('Monthly salary must be a positive number')
-      .required('Monthly salary is required'),
-    overtimeRate: yup
-      .number()
-      .positive('Overtime rate must be a positive number')
-      .required('Overtime rate is required'),
-    allowedPaidLeaves: yup.number().positive('Remaining Paid Leaves must be a positive number').required(),
+    // monthlySalary: yup.number().positive('Monthly salary must be a positive number'),
+    // overtimeRate: yup.number().positive('Overtime rate must be a positive number'),
+    // allowedPaidLeaves: yup.number().positive('Remaining Paid Leaves must be a positive number').required(),
     bankDetails: bankDetailsSchema.test('all-or-none', 'Invalid bank details!', (value) => {
       if (!value) return true;
       const fields = Object.values(value).filter(Boolean);

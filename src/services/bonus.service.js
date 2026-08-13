@@ -106,9 +106,7 @@ export const calculateAutoBonusForMonth = async (officeId, month, year) => {
     throw new ApiError(400, 'Bad Request', 'Bonus mode is not set to "auto" for this office.');
   }
 
-  const rule = (structure.bonus.rules || []).find(
-    (r) => r.lastMonth === Number(month) && r.lastYear === Number(year)
-  );
+  const rule = (structure.bonus.rules || []).find((r) => r.lastMonth === Number(month) && r.lastYear === Number(year));
   if (!rule) {
     throw new ApiError(400, 'Bad Request', `No bonus rule configured for ${month}/${year}.`);
   }
@@ -392,63 +390,318 @@ export const generateBonusRegisterPdf = async (officeId, month, year) => {
   const doc = new jsPDF({ format: 'a4', orientation: 'p' });
   const pageWidth = doc.internal.pageSize.width || doc.internal.pageSize.getWidth();
   const pageHeight = doc.internal.pageSize.height || doc.internal.pageSize.getHeight();
+  const marginX = 14;
+  const contentWidth = pageWidth - marginX * 2;
 
-  doc.setFont('times', 'bold');
-  doc.setFontSize(14);
-  doc.text('BONUS REGISTER', pageWidth / 2, 10, { align: 'center' });
-  doc.setFontSize(10);
-  doc.text(officeName, pageWidth / 2, 15, { align: 'center' });
-  doc.setFontSize(9);
-  doc.text(`Period: ${label}`, pageWidth / 2, 20, { align: 'center' });
+  const NAVY = [30, 41, 59];
+  const BLUE = [46, 134, 171];
+  const LIGHT_BLUE = [219, 234, 254];
+  const BORDER = [214, 221, 229];
 
-  const headers = [['SL', 'STAFF ID', 'NAME', 'AMOUNT', 'SIGNATURE']];
-  const body = [];
+  const drawLetterhead = () => {
+    doc.setFillColor(...NAVY);
+    doc.rect(0, 0, pageWidth, 24, 'F');
 
-  departments.forEach((dept) => {
-    body.push([
-      {
-        content: dept.departmentName.toUpperCase(),
-        colSpan: 5,
-        styles: { fillColor: [230, 230, 230], fontStyle: 'bold', halign: 'left' },
+    doc.setFont('helvetica', 'bold');
+    doc.setFontSize(15);
+    doc.setTextColor(255, 255, 255);
+    doc.text(officeName?.toUpperCase() || 'COMPANY NAME', marginX, 11);
+
+    doc.setFont('helvetica', 'normal');
+    doc.setFontSize(9);
+    doc.setTextColor(210, 220, 230);
+    doc.text('Bonus Register', marginX, 18);
+
+    doc.setFont('helvetica', 'bold');
+    doc.setFontSize(9);
+    const periodText = `PERIOD: ${label}`;
+    const periodWidth = doc.getTextWidth(periodText) + 8;
+    doc.setFillColor(...BLUE);
+    doc.roundedRect(pageWidth - marginX - periodWidth, 7, periodWidth, 9, 1.5, 1.5, 'F');
+    doc.setTextColor(255, 255, 255);
+    doc.text(periodText, pageWidth - marginX - periodWidth / 2, 13, { align: 'center' });
+
+    doc.setTextColor(0, 0, 0);
+  };
+
+  const drawDeptBanner = (deptName, y) => {
+    doc.setFillColor(...LIGHT_BLUE);
+    doc.setDrawColor(...BLUE);
+    doc.setLineWidth(0.3);
+    doc.roundedRect(marginX, y, contentWidth, 9, 1, 1, 'FD');
+    doc.setFillColor(...BLUE);
+    doc.rect(marginX, y, 2.5, 9, 'F');
+    doc.setFont('helvetica', 'bold');
+    doc.setFontSize(10.5);
+    doc.setTextColor(...NAVY);
+    doc.text(deptName.toUpperCase(), marginX + 6, y + 6);
+    doc.setTextColor(0, 0, 0);
+  };
+
+  const drawFooter = () => {
+    doc.setDrawColor(...BORDER);
+    doc.setLineWidth(0.2);
+    doc.line(marginX, pageHeight - 14, pageWidth - marginX, pageHeight - 14);
+    doc.setFont('helvetica', 'normal');
+    doc.setFontSize(7.5);
+    doc.setTextColor(120, 120, 120);
+    const generatedDate = `Generated: ${new Date().toLocaleDateString()} ${new Date().toLocaleTimeString()}`;
+    doc.text(generatedDate, marginX, pageHeight - 9);
+    const pageLabel = `Page ${doc.internal.getNumberOfPages()}`;
+    const pw = doc.getTextWidth(pageLabel);
+    doc.text(pageLabel, pageWidth - marginX - pw, pageHeight - 9);
+    doc.setTextColor(0, 0, 0);
+  };
+
+  // Fixed column widths — SL/ID/AMOUNT/SIGNATURE take a fixed share,
+  // NAME absorbs the rest, so nothing ever gets clipped.
+  const colSL = 10;
+  const colStaffId = 24;
+  const colAmount = 28;
+  const colSignature = 32;
+  const colName = contentWidth - colSL - colStaffId - colAmount - colSignature;
+
+  const columnStyles = {
+    0: { cellWidth: colSL, halign: 'center' },
+    1: { cellWidth: colStaffId, halign: 'center' },
+    2: { cellWidth: colName, halign: 'left', overflow: 'linebreak' },
+    3: { cellWidth: colAmount, halign: 'right' },
+    4: { cellWidth: colSignature, halign: 'center' },
+  };
+
+  // One department = one page. If a department's staff list overflows the page,
+  // autoTable adds a continuation page and didDrawPage re-draws the letterhead/banner on it.
+  departments.forEach((dept, deptIndex) => {
+    if (deptIndex > 0) doc.addPage();
+
+    drawLetterhead();
+    drawDeptBanner(dept.departmentName, 30);
+
+    const body = dept.staff.map((s, i) => [i + 1, s.staffCode, s.staffName, safeToFixed(s.amount), '']);
+    const startPage = doc.internal.getNumberOfPages();
+
+    autoTable(doc, {
+      startY: 43,
+      margin: { left: marginX, right: marginX, bottom: 20 },
+      head: [['SL', 'STAFF ID', 'NAME', 'AMOUNT', 'SIGNATURE']],
+      body,
+      foot: [
+        [
+          { content: 'DEPARTMENT TOTAL', colSpan: 3, styles: { halign: 'right', fontStyle: 'bold' } },
+          { content: safeToFixed(dept.departmentTotal), styles: { fontStyle: 'bold' } },
+          '',
+        ],
+      ],
+      showFoot: 'lastPage',
+      theme: 'grid',
+      styles: {
+        fontSize: 9,
+        cellPadding: 2.5,
+        valign: 'middle',
+        overflow: 'linebreak',
+        lineColor: BORDER,
+        lineWidth: 0.15,
       },
-    ]);
-    dept.staff.forEach((s, i) => {
-      body.push([i + 1, s.staffCode, s.staffName, safeToFixed(s.amount), '']);
+      headStyles: { fillColor: NAVY, textColor: [255, 255, 255], fontSize: 9, halign: 'center' },
+      footStyles: { fillColor: [235, 242, 250], textColor: NAVY, fontSize: 9.5 },
+      alternateRowStyles: { fillColor: [245, 248, 252] },
+      columnStyles,
+      showHead: 'everyPage',
+      rowPageBreak: 'avoid', // a staff row never splits across two pages
+      didDrawPage: (data) => {
+        if (data.pageNumber > startPage) {
+          drawLetterhead();
+          drawDeptBanner(`${dept.departmentName} (contd.)`, 30);
+          data.settings.margin.top = 43;
+        }
+      },
     });
-    body.push([
-      { content: 'Department Total', colSpan: 3, styles: { fontStyle: 'bold', halign: 'right' } },
-      { content: safeToFixed(dept.departmentTotal), styles: { fontStyle: 'bold' } },
-      '',
-    ]);
   });
 
-  body.push([
-    {
-      content: 'GRAND TOTAL',
-      colSpan: 3,
-      styles: { fontStyle: 'bold', halign: 'right', fillColor: [46, 134, 171], textColor: [255, 255, 255] },
-    },
-    { content: safeToFixed(grandTotal), styles: { fontStyle: 'bold', fillColor: [46, 134, 171], textColor: [255, 255, 255] } },
-    { content: '', styles: { fillColor: [46, 134, 171] } },
-  ]);
+  // ---------- Summary page ----------
+  doc.addPage();
+  drawLetterhead();
+  doc.setFont('helvetica', 'bold');
+  doc.setFontSize(11);
+  doc.setTextColor(...NAVY);
+  doc.text('SUMMARY', marginX, 34);
+  doc.setTextColor(0, 0, 0);
+
+  const summaryBody = departments.map((d) => [d.departmentName, safeToFixed(d.departmentTotal)]);
 
   autoTable(doc, {
-    startY: 25,
-    head: headers,
-    body,
-    theme: 'grid',
-    styles: { fontSize: 9, cellPadding: 2 },
-    headStyles: { fillColor: [46, 134, 171], fontSize: 9 },
-    columnStyles: { 4: { minCellWidth: 30 } },
-    showHead: 'everyPage',
-    didDrawPage: (data) => {
-      doc.setFontSize(8);
-      const generatedDate = `Generated: ${new Date().toLocaleDateString()} ${new Date().toLocaleTimeString()}`;
-      const textWidth = doc.getTextWidth(generatedDate);
-      doc.text(generatedDate, pageWidth - data.settings.margin.right - textWidth, pageHeight - 10);
-      doc.text(`Page ${doc.internal.getNumberOfPages()}`, data.settings.margin.left, pageHeight - 10);
+    startY: 40,
+    margin: { left: marginX, right: marginX },
+    head: [['Department', 'Total Amount']],
+    body: summaryBody,
+    foot: [
+      [
+        { content: 'GRAND TOTAL', styles: { fontStyle: 'bold' } },
+        { content: safeToFixed(grandTotal), styles: { fontStyle: 'bold' } },
+      ],
+    ],
+    theme: 'plain',
+    styles: {
+      fontSize: 9.5,
+      cellPadding: { top: 3.5, bottom: 3.5, left: 4, right: 4 },
+      lineColor: BORDER,
+      lineWidth: 0.15,
+      overflow: 'linebreak',
     },
+    headStyles: { fillColor: NAVY, textColor: [255, 255, 255], fontStyle: 'bold', halign: 'center' },
+    footStyles: { fillColor: BLUE, textColor: [255, 255, 255], fontSize: 10.5 },
+    alternateRowStyles: { fillColor: [237, 242, 247] },
+    columnStyles: { 0: { halign: 'left' }, 1: { halign: 'right' } },
   });
+
+  // ---------- Footer on every page (single pass at the end) ----------
+  const totalPages = doc.internal.getNumberOfPages();
+  for (let p = 1; p <= totalPages; p++) {
+    doc.setPage(p);
+    drawFooter();
+  }
+
+  return doc.output('arraybuffer');
+};
+
+export const generateBonusRegisterWithoutSigPdf = async (officeId, month, year) => {
+  const { departments, grandTotal, label, officeName } = await buildBonusRegisterData(officeId, month, year);
+
+  const doc = new jsPDF({ format: 'a4', orientation: 'p' });
+  const pageWidth = doc.internal.pageSize.width || doc.internal.pageSize.getWidth();
+  const pageHeight = doc.internal.pageSize.height || doc.internal.pageSize.getHeight();
+  const marginX = 10;
+  const contentWidth = pageWidth - marginX * 2;
+
+  const NAVY = [30, 41, 59];
+  const BLUE = [46, 134, 171];
+  const LIGHT_BLUE = [219, 234, 254];
+  const BORDER = [214, 221, 229];
+
+  // ---------- Header banner (once, page 1) ----------
+  const headerHeight = 26;
+  doc.setFillColor(...NAVY);
+  doc.rect(0, 0, pageWidth, headerHeight, 'F');
+
+  doc.setFont('helvetica', 'bold');
+  doc.setFontSize(16);
+  doc.setTextColor(255, 255, 255);
+  doc.text(officeName?.toUpperCase() || 'COMPANY NAME', marginX, 13);
+
+  doc.setFont('helvetica', 'normal');
+  doc.setFontSize(9);
+  doc.setTextColor(200, 210, 225);
+  doc.text('Bonus Register', marginX, 19);
+
+  const periodText = `PERIOD: ${label}`;
+  doc.setFont('helvetica', 'bold');
+  doc.setFontSize(9);
+  const periodTextWidth = doc.getTextWidth(periodText);
+  const badgeWidth = periodTextWidth + 10;
+  const badgeHeight = 9;
+  const badgeX = pageWidth - marginX - badgeWidth;
+  const badgeY = 8;
+  doc.setFillColor(...BLUE);
+  doc.roundedRect(badgeX, badgeY, badgeWidth, badgeHeight, 2, 2, 'F');
+  doc.setTextColor(255, 255, 255);
+  doc.text(periodText, badgeX + badgeWidth / 2, badgeY + badgeHeight / 2 + 1.2, { align: 'center' });
+
+  doc.setTextColor(0, 0, 0);
+
+  let cursorY = headerHeight + 10;
+
+  // Fixed column widths (mm) — NAME/AMOUNT never squeezed or clipped.
+  const colSL = 12;
+  const colStaffId = 28;
+  const colAmount = 34;
+  const colName = contentWidth - colSL - colStaffId - colAmount;
+
+  const columnStyles = {
+    0: { cellWidth: colSL, halign: 'center' },
+    1: { cellWidth: colStaffId, halign: 'center' },
+    2: { cellWidth: colName, halign: 'left', overflow: 'linebreak' },
+    3: { cellWidth: colAmount, halign: 'right' },
+  };
+
+  // Continuous flow — no forced page-per-department. A department only moves
+  // to a new page if its banner genuinely doesn't fit; the table body itself
+  // paginates naturally via autoTable.
+  departments.forEach((dept) => {
+    if (cursorY > pageHeight - 40) {
+      doc.addPage();
+      cursorY = 15;
+    }
+
+    doc.setFillColor(...LIGHT_BLUE);
+    doc.rect(marginX, cursorY, contentWidth, 8, 'F');
+    doc.setFillColor(...BLUE);
+    doc.rect(marginX, cursorY, 1.5, 8, 'F');
+    doc.setFont('helvetica', 'bold');
+    doc.setFontSize(10);
+    doc.setTextColor(...NAVY);
+    doc.text(dept.departmentName.toUpperCase(), marginX + 5, cursorY + 5.5);
+    doc.setTextColor(0, 0, 0);
+    cursorY += 8;
+
+    const body = dept.staff.map((s, i) => [i + 1, s.staffCode, s.staffName, safeToFixed(s.amount)]);
+    const totalRowIndex = body.length;
+    body.push([
+      { content: 'DEPARTMENT TOTAL', colSpan: 3, styles: { fontStyle: 'bold', halign: 'right' } },
+      { content: safeToFixed(dept.departmentTotal), styles: { fontStyle: 'bold' } },
+    ]);
+
+    autoTable(doc, {
+      startY: cursorY,
+      margin: { left: marginX, right: marginX, bottom: 16 },
+      head: [['SL', 'STAFF ID', 'NAME', 'AMOUNT']],
+      body,
+      theme: 'grid',
+      styles: {
+        fontSize: 9,
+        cellPadding: 2.5,
+        valign: 'middle',
+        overflow: 'linebreak',
+        lineColor: BORDER,
+        lineWidth: 0.15,
+      },
+      headStyles: { fillColor: NAVY, textColor: [255, 255, 255], fontSize: 9, halign: 'center' },
+      alternateRowStyles: { fillColor: [245, 248, 252] },
+      columnStyles,
+      rowPageBreak: 'avoid', // a staff row never splits across two pages
+      didParseCell: (data) => {
+        if (data.row.index === totalRowIndex) {
+          data.cell.styles.fillColor = [235, 242, 250];
+        }
+      },
+    });
+
+    cursorY = doc.lastAutoTable.finalY + 8;
+  });
+
+  // ---------- Grand total bar ----------
+  if (cursorY > pageHeight - 25) {
+    doc.addPage();
+    cursorY = 15;
+  }
+  doc.setFillColor(...BLUE);
+  doc.roundedRect(marginX, cursorY, contentWidth, 12, 2, 2, 'F');
+  doc.setFont('helvetica', 'bold');
+  doc.setFontSize(11);
+  doc.setTextColor(255, 255, 255);
+  doc.text('GRAND TOTAL', marginX + 5, cursorY + 8);
+  doc.text(safeToFixed(grandTotal), pageWidth - marginX - 5, cursorY + 8, { align: 'right' });
+  doc.setTextColor(0, 0, 0);
+
+  // ---------- Footer on every page ----------
+  const totalPages = doc.internal.getNumberOfPages();
+  for (let p = 1; p <= totalPages; p++) {
+    doc.setPage(p);
+    doc.setFontSize(8);
+    doc.setTextColor(120, 120, 120);
+    const generatedDate = `Generated: ${new Date().toLocaleDateString()} ${new Date().toLocaleTimeString()}`;
+    doc.text(generatedDate, marginX, pageHeight - 8);
+    doc.text(`Page ${p} of ${totalPages}`, pageWidth - marginX, pageHeight - 8, { align: 'right' });
+  }
 
   return doc.output('arraybuffer');
 };

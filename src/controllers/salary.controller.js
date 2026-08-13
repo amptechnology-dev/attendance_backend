@@ -11,7 +11,9 @@ import {
   generateSalaryRegisterPdf,
   updateManualConveyanceForSalary,
   updateManualAdvanceForSalary,
-  getSalaryFreezeStatus
+  getSalaryFreezeStatus,
+  generateSalaryPdfConveyanceOT,
+  generateSalaryByMonthConveyanceOT,
 } from '../services/salary.service.js';
 import { AdvanceTransaction } from '../models/salary.model.js';
 import { HolidayFund } from '../models/holidayFund.model.js';
@@ -426,3 +428,25 @@ export const getFreezeStatus = expressAsyncHandler(async (req, res) => {
   const data = await getSalaryFreezeStatus(req.admin.office, parseInt(month), parseInt(year));
   return new ApiResponse(200, data, 'Freeze status fetched successfully.').send(res);
 });
+
+export const getSalaryPdfByStaffConveyanceOT = expressAsyncHandler(async (req, res) => {
+  const { staffId, month, year } = req.body;
+
+  const pdfBuffer = await generateSalaryPdfConveyanceOT(req.admin.office, staffId, parseInt(month), parseInt(year));
+
+  res.setHeader('Content-Type', 'application/pdf');
+  res.setHeader('Content-Disposition', 'inline; filename="payslip_conveyance_ot.pdf"');
+  res.send(Buffer.from(pdfBuffer));
+});
+
+export const getSalaryPdfByMonthConveyanceOT = expressAsyncHandler(async (req, res) => {
+  const { month, year } = req.body;
+
+  const pdfBuffer = await generateSalaryByMonthConveyanceOT(req.admin.office, parseInt(month), parseInt(year));
+
+  res.setHeader('Content-Type', 'application/pdf');
+  res.setHeader('Content-Disposition', 'inline; filename="payslip_conveyance_ot.pdf"');
+  res.send(Buffer.from(pdfBuffer));
+});
+
+

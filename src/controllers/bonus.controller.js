@@ -6,6 +6,7 @@ import {
   saveManualBonusEntries,
   getManualBonusRangeStaff,
   generateBonusRegisterPdf,
+  generateBonusRegisterWithoutSigPdf,
   generateBonusRegisterExcel,
 } from '../services/bonus.service.js';
 
@@ -55,6 +56,14 @@ export const getBonusRegisterPdf = expressAsyncHandler(async (req, res) => {
   const { month, year } = req.body;
   const pdfBuffer = await generateBonusRegisterPdf(req.admin.office, parseInt(month), parseInt(year));
 
+  res.setHeader('Content-Type', 'application/pdf');
+  res.setHeader('Content-Disposition', `inline; filename="bonus_register_${month}_${year}.pdf"`);
+  res.send(Buffer.from(pdfBuffer));
+});
+
+export const getBonusRegisterPdfWithoutSignature = expressAsyncHandler(async (req, res) => {
+  const { month, year } = req.body;
+  const pdfBuffer = await generateBonusRegisterWithoutSigPdf(req.admin.office, parseInt(month), parseInt(year));
   res.setHeader('Content-Type', 'application/pdf');
   res.setHeader('Content-Disposition', `inline; filename="bonus_register_${month}_${year}.pdf"`);
   res.send(Buffer.from(pdfBuffer));

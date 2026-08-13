@@ -991,7 +991,7 @@ export const generateSalaryPdf = async (officeId, staffId, month, year) => {
   doc.setFontSize(14);
   doc.setLineWidth(0.5);
   doc.text(
-    `PAY SLIP FOR THE MONTH OF ${format(new Date(salary.year, salary.month - 1), 'MMMM').toUpperCase()} - ${salary.year}`,
+    `PAY DETAILS FOR THE MONTH OF ${format(new Date(salary.year, salary.month - 1), 'MMMM').toUpperCase()} - ${salary.year}`,
     pageWidth / 2,
     10,
     { align: 'center' }
@@ -1222,7 +1222,7 @@ export const generateSalaryByMonth = async (officeId, month, year) => {
     doc.setLineWidth(0.5);
 
     doc.text(
-      `PAY SLIP FOR THE MONTH OF ${format(new Date(salary.year, salary.month - 1), 'MMMM').toUpperCase()} - ${salary.year}`,
+      `PAY DETAILS FOR THE MONTH OF ${format(new Date(salary.year, salary.month - 1), 'MMMM').toUpperCase()} - ${salary.year}`,
       pageWidth / 2,
       startY - 10,
       { align: 'center' }
@@ -1832,3 +1832,237 @@ export const updateManualAdvanceForSalary = async (officeId, salaryId, newAdvanc
 
   return updatedSalary;
 };
+
+export const generateSalaryPdfConveyanceOT = async (officeId, staffId, month, year) => {
+  const [salary, salaryStructure] = await Promise.all([
+    Salary.findOne({ office: officeId, staff: staffId, month, year })
+      .populate('office', 'name')
+      .populate('staff', 'fullName pfNo esiNo')
+      .lean(),
+    SalaryStructure.findOne({ office: officeId }).lean(),
+  ]);
+
+  if (!salary) {
+    throw new ApiError(404, 'Not Found!', 'Salary not found for the given staff and month.');
+  }
+  if (!salaryStructure) {
+    throw new ApiError(404, 'Not Found!', 'Salary configuration not found for this office.');
+  }
+
+  const doc = new jsPDF({ format: 'a4', orientation: 'l' });
+  const pageHeight = doc.internal.pageSize.height || doc.internal.pageSize.getHeight();
+  const pageWidth = doc.internal.pageSize.width || doc.internal.pageSize.getWidth();
+
+  doc.setFont('times', 'bold');
+  doc.setFontSize(14);
+  doc.setLineWidth(0.5);
+  doc.text(
+    `PAY SLIP FOR THE MONTH OF ${format(new Date(salary.year, salary.month - 1), 'MMMM').toUpperCase()} - ${salary.year}`,
+    pageWidth / 2,
+    10,
+    { align: 'center' }
+  );
+  doc.setLineWidth(0.1);
+  doc.line(pageWidth * 0.3, 11, pageWidth * 0.7, 11);
+  doc.setFontSize(10);
+  doc.text(salary.office?.name, pageWidth / 2, 15, { align: 'center' });
+
+  const columnDefs = buildConveyanceOTColumnDefs(salaryStructure, true);
+
+  const headers = [columnDefs.map((col) => col.header)];
+  const rows = [columnDefs.map((col) => col.getValue(salary))];
+
+  autoTable(doc, {
+    startY: 20,
+    head: headers,
+    body: rows,
+    theme: 'grid',
+    didDrawPage: (data) => {
+      doc.setFontSize(8);
+      const officeUseText = `For ${salary.office?.name || ''}`;
+      const officeTextWidth = doc.getTextWidth(officeUseText);
+      doc.text(officeUseText, pageWidth - data.settings.margin.right - officeTextWidth, data.cursor.y + 15);
+
+      doc.setLineWidth(0.2);
+      doc.setLineDashPattern([2, 1]);
+      doc.line(
+        data.settings.margin.left,
+        data.cursor.y + 25,
+        pageWidth - data.settings.margin.right,
+        data.cursor.y + 25
+      );
+
+      const pageCount = doc.internal.getNumberOfPages();
+      const footerText = `Page ${pageCount}`;
+      const generatedDate = `Generated: ${new Date().toLocaleDateString()} ${new Date().toLocaleTimeString()}`;
+
+      doc.setFontSize(10);
+      doc.text(footerText, data.settings.margin.left, pageHeight - 10);
+
+      const textWidth = doc.getTextWidth(generatedDate);
+      doc.text(generatedDate, pageWidth - data.settings.margin.right - textWidth, pageHeight - 10);
+    },
+  });
+
+  return doc.output('arraybuffer');
+};
+
+export const generateSalaryByMonthConveyanceOT = async (officeId, month, year) => {
+  const [salaries, salaryStructure] = await Promise.all([
+    Salary.find({ office: officeId, month, year })
+      .populate('office', 'name')
+      .populate('staff', 'fullName pfNo esiNo')
+      .lean(),
+    SalaryStructure.findOne({ office: officeId }).lean(),
+  ]);
+
+  if (!salaries.length) {
+    throw new ApiError(404, 'Not Found!', 'No salaries found for the given month.');
+  }
+  if (!salaryStructure) {
+    throw new ApiError(404, 'Not Found!', 'Salary configuration not found for this office.');
+  }
+
+  const doc = new jsPDF({ format: 'a4', orientation: 'l' });
+  const pageHeight = doc.internal.pageSize.height || doc.internal.pageSize.getHeight();
+  const pageWidth = doc.internal.pageSize.width || doc.internal.pageSize.getWidth();
+
+  const columnDefs = buildConveyanceOTColumnDefs(salaryStructure, true);
+  const headers = [columnDefs.map((col) => col.header)];
+
+  let rowIndex = 0;
+  let startY = 20;
+  let footerPrinted = false;
+
+  for (const salary of salaries) {
+    if (rowIndex > 0 && rowIndex % 3 === 0) {
+      doc.addPage();
+      startY = 20;
+      footerPrinted = false;
+    }
+    doc.setFont('times', 'bold');
+    doc.setFontSize(14);
+    doc.setLineWidth(0.5);
+
+    doc.text(
+      `PAY SLIP FOR THE MONTH OF ${format(new Date(salary.year, salary.month - 1), 'MMMM').toUpperCase()} - ${salary.year}`,
+      pageWidth / 2,
+      startY - 10,
+      { align: 'center' }
+    );
+    doc.setLineWidth(0.1);
+    doc.setLineDashPattern([0, 0]);
+    doc.line(pageWidth * 0.3, startY - 9, pageWidth * 0.7, startY - 9);
+    doc.setFontSize(10);
+    doc.text(salary.office?.name, pageWidth / 2, startY - 5, { align: 'center' });
+
+    const rows = [columnDefs.map((col) => col.getValue(salary))];
+
+    autoTable(doc, {
+      startY: startY,
+      head: headers,
+      body: rows,
+      theme: 'grid',
+      didDrawPage: (data) => {
+        doc.setFontSize(8);
+        const officeUseText = `For ${salary.office?.name || ''}`;
+        const officeTextWidth = doc.getTextWidth(officeUseText);
+        doc.text(officeUseText, pageWidth - data.settings.margin.right - officeTextWidth, data.cursor.y + 15);
+
+        doc.setLineWidth(0.2);
+        doc.setLineDashPattern([2, 1]);
+        doc.line(
+          data.settings.margin.left,
+          data.cursor.y + 25,
+          pageWidth - data.settings.margin.right,
+          data.cursor.y + 25
+        );
+
+        if (!footerPrinted) {
+          doc.setFontSize(10);
+          doc.text(`Page ${doc.internal.getNumberOfPages()}`, data.settings.margin.left, pageHeight - 10);
+
+          const generatedDate = `Generated: ${new Date().toLocaleDateString()} ${new Date().toLocaleTimeString()}`;
+          const textWidth = doc.getTextWidth(generatedDate);
+          doc.text(generatedDate, pageWidth - data.settings.margin.right - textWidth, pageHeight - 10);
+          footerPrinted = true;
+        }
+      },
+    });
+
+    rowIndex++;
+    startY = doc.lastAutoTable.finalY + 50;
+  }
+
+  return doc.output('arraybuffer');
+};
+
+// Shared column builder for both single-staff & by-month CONV+OT variants
+// so both stay in sync automatically — change once, both PDFs update.
+function buildConveyanceOTColumnDefs(salaryStructure, singleStaffRateFormula) {
+  const columnDefs = [
+    { header: 'Name', getValue: (s) => s.staff?.fullName || '-' },
+    {
+      header: 'Rate',
+      getValue: (s) => (singleStaffRateFormula ? Math.round(s.baseSalary / s.totalPayableDays) : s.baseSalary),
+    },
+    { header: 'W/D', getValue: (s) => s.workedDays ?? 0 },
+    { header: 'BASIC', getValue: (s) => safeToFixed(s.breakdown?.basic) },
+  ];
+
+  if (salaryStructure.da?.enabled) {
+    columnDefs.push({ header: 'DA', getValue: (s) => safeToFixed(s.breakdown?.da) });
+  }
+  if (salaryStructure.hra?.enabled) {
+    columnDefs.push({ header: 'HRA', getValue: (s) => safeToFixed(s.breakdown?.hra) });
+  }
+  if (salaryStructure.specialAllowance?.enabled) {
+    columnDefs.push({ header: 'SPL ALLOW', getValue: (s) => safeToFixed(s.breakdown?.specialAllowance) });
+  }
+  if (salaryStructure.otherAllowance?.enabled) {
+    columnDefs.push({ header: 'Other Allowance', getValue: (s) => safeToFixed(s.breakdown?.otherAllowance) });
+  }
+
+  columnDefs.push({
+    header: 'Gross Wages',
+    getValue: (s) =>
+      safeToFixed(
+        (s.breakdown?.basic ?? 0) +
+          (s.breakdown?.da ?? 0) +
+          (s.breakdown?.hra ?? 0) +
+          (s.breakdown?.otherAllowance ?? 0) +
+          (s.breakdown?.specialAllowance ?? 0)
+      ),
+  });
+
+  // CONV always shown here (not gated behind salaryStructure.conveyance.enabled)
+  // because OT needs a column to sit in even when conveyance itself is off.
+  columnDefs.push({
+    header: 'CONV',
+    getValue: (s) => safeToFixed((s.breakdown?.conveyance ?? 0) + (s.breakdown?.overtime ?? 0)),
+  });
+
+  columnDefs.push({ header: 'TOTAL GROSS', getValue: (s) => safeToFixed(s.grossSalary) });
+
+  if (salaryStructure.pf?.enabled) {
+    columnDefs.push({ header: 'PF', getValue: (s) => safeToFixed(s.breakdown?.pf) });
+  }
+  if (salaryStructure.esi?.enabled) {
+    columnDefs.push({ header: 'ESI', getValue: (s) => safeToFixed(s.breakdown?.esi) });
+  }
+  if (salaryStructure.pTax?.enabled) {
+    columnDefs.push({ header: 'P TAX', getValue: (s) => safeToFixed(s.breakdown?.pTax) });
+  }
+  if (salaryStructure.lwf?.enabled) {
+    columnDefs.push({ header: 'LWF', getValue: (s) => safeToFixed(s.breakdown?.lwf) });
+  }
+
+  columnDefs.push({ header: 'ADV.', getValue: (s) => safeToFixed(s.breakdown?.advanceDeduction) });
+
+  // No OT column pushed here on purpose — that's the whole point of this variant.
+
+  columnDefs.push({ header: 'TD', getValue: (s) => safeToFixed(s.deductions) });
+  columnDefs.push({ header: 'Net Amt.', getValue: (s) => s.netSalary });
+
+  return columnDefs;
+}

@@ -22,6 +22,8 @@ import {
   confirmUnfreeze,
   requestUnfreezeOtp,
   getFreezeStatus,
+  getSalaryPdfByStaffConveyanceOT,
+  getSalaryPdfByMonthConveyanceOT,
 } from '../controllers/salary.controller.js';
 import {
   getBonusSettingMonthsList,
@@ -30,6 +32,7 @@ import {
   getManualBonusStaffListHandler,
   getBonusRegisterPdf,
   getBonusRegisterExcel,
+  getBonusRegisterPdfWithoutSignature
 } from '../controllers/bonus.controller.js';
 import { getOvertimeReportByMonth, applyOvertimeForStaff } from '../controllers/overtime.controller.js';
 import { adminAuth } from '../middlewares/auth.middleware.js';
@@ -51,6 +54,12 @@ router.route('/advance/update').put(validate(updateAdvanceSalaryValidationSchema
 router.route('/advance/mark-as-paid').post(markAdvanceAsPaid);
 router.route('/slip/get-by-staff').post(parseMonthInput, validate(monthYearSchema), getSalaryPdfByStaff);
 router.route('/slip/get-by-month').post(parseMonthInput, validate(monthYearSchema), getSalaryPdfByMonth);
+router
+  .route('/slip-conv-ot/get-by-staff')
+  .post(parseMonthInput, validate(monthYearSchema), getSalaryPdfByStaffConveyanceOT);
+router
+  .route('/slip-conv-ot/get-by-month')
+  .post(parseMonthInput, validate(monthYearSchema), getSalaryPdfByMonthConveyanceOT);
 router.route('/excel/get-by-month').post(parseMonthInput, validate(monthYearSchema), getSalaryExcelByMonth);
 router.route('/table/get-by-month').post(parseMonthInput, validate(monthYearSchema), getSalaryTablesByMonth);
 router
@@ -73,6 +82,7 @@ router.route('/bonus/register').get(getBonusRegisterByMonth);
 router.route('/bonus/manual/staff-list').get(getManualBonusStaffListHandler);
 router.route('/bonus/manual').post(saveManualBonus);
 router.route('/bonus/register/pdf').post(getBonusRegisterPdf);
+router.route('/bonus/register/pdf-without-signature').post(getBonusRegisterPdfWithoutSignature);
 router.route('/bonus/register/excel').post(getBonusRegisterExcel);
 
 export default router;
