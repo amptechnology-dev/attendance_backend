@@ -16,6 +16,7 @@ import { WeekOff } from '../models/weekOff.model.js';
 import { OffDayWork } from '../models/offDayWork.model.js';
 import { AttendanceCalculation } from '../models/attendanceCalculation.model.js';
 
+
 export const getAttendanceLogs = expressAsyncHandler(async (req, res) => {
   const { startDate, endDate, date, days, limit, search } = req.query;
   const user = req.admin;
@@ -24,43 +25,25 @@ export const getAttendanceLogs = expressAsyncHandler(async (req, res) => {
     office: user.office,
   };
 
-  // Single Date Filter
   if (date) {
     const start = new Date(date);
     start.setHours(0, 0, 0, 0);
-
     const end = new Date(date);
     end.setHours(23, 59, 59, 999);
-
-    filters.date = {
-      $gte: start,
-      $lte: end,
-    };
-  }
-  // Date Range Filter
-  else {
+    filters.date = { $gte: start, $lte: end };
+  } else {
     if (startDate) {
-      filters.date = {
-        ...(filters.date || {}),
-        $gte: new Date(startDate),
-      };
+      filters.date = { ...(filters.date || {}), $gte: new Date(startDate) };
     }
-
     if (endDate) {
       const end = new Date(endDate);
       end.setHours(23, 59, 59, 999);
-
-      filters.date = {
-        ...(filters.date || {}),
-        $lte: end,
-      };
+      filters.date = { ...(filters.date || {}), $lte: end };
     }
   }
 
-  // Last X Days
   if (days) {
     const currentDate = getCurrentDate();
-
     filters.date = {
       ...(filters.date || {}),
       $gte: subDays(new Date(currentDate), Number(days)),
@@ -69,7 +52,6 @@ export const getAttendanceLogs = expressAsyncHandler(async (req, res) => {
 
   let staffMatchFilter = {};
 
-  // Permission Check
   const hasFullAccess =
     user.role?.permissions?.includes(permissions.ALL) ||
     user.role?.permissions?.includes(permissions.VIEW_ALL_ATTENDANCE);
@@ -78,34 +60,24 @@ export const getAttendanceLogs = expressAsyncHandler(async (req, res) => {
     staffMatchFilter.department = user.department;
   }
 
-  // Staff Search
   if (search) {
     const staffQuery = {
       office: user.office,
-      fullName: {
-        $regex: search,
-        $options: 'i',
-      },
+      fullName: { $regex: search, $options: 'i' },
     };
-
     if (!hasFullAccess) {
       staffQuery.department = user.department;
     }
-
-    const staffs = await Staff.find(staffQuery).select('_id');
-
-    staffMatchFilter.staffId = {
-      $in: staffs.map((staff) => staff._id),
-    };
+    const staffs = await Staff.find(staffQuery).select('_id').lean();
+    staffMatchFilter.staffId = { $in: staffs.map((staff) => staff._id) };
   } else if (!hasFullAccess) {
     const staffs = await Staff.find({
       office: user.office,
       department: user.department,
-    }).select('_id');
-
-    staffMatchFilter.staffId = {
-      $in: staffs.map((staff) => staff._id),
-    };
+    })
+      .select('_id')
+      .lean();
+    staffMatchFilter.staffId = { $in: staffs.map((staff) => staff._id) };
   }
 
   const attendances = await Attendance.find({
@@ -113,9 +85,16 @@ export const getAttendanceLogs = expressAsyncHandler(async (req, res) => {
     ...staffMatchFilter,
   })
     .populate('staffId', 'fullName staffId')
-    .populate('logs')
+    .populate({
+      path: 'logs',
+      select: 'entryTime exitTime workingTime slNo manual', // 🔥 শুধু দরকারি log fields
+    })
+    .select(
+      'office staffId date status firstHalf secondHalf breakTime logs isLate allowedLate hrAdjustments totalWorkTime leaveStatus isOffDayWork offDayAssignmentId validOffDayWork'
+    )
     .sort({ date: -1, createdAt: -1 })
-    .limit(limit && !isNaN(Number(limit)) ? Number(limit) : undefined);
+    .limit(limit && !isNaN(Number(limit)) ? Number(limit) : undefined)
+    .lean(); // 🔥 read-only listing
 
   return new ApiResponse(200, attendances, 'All attendance fetched successfully').send(res);
 });

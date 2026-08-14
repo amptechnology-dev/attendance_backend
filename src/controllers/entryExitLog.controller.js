@@ -395,6 +395,7 @@ export const manualExitLog = expressAsyncHandler(async (req, res) => {
   return new ApiResponse(200, updatedLog, 'Exit time updated successfully.').send(res);
 });
 
+
 export const getEntryExitLogs = expressAsyncHandler(async (req, res) => {
   const { date, startDate, endDate, days, search } = req.query;
 
@@ -402,59 +403,38 @@ export const getEntryExitLogs = expressAsyncHandler(async (req, res) => {
     office: req.admin.office,
   };
 
-  // Single Date Filter
   if (date) {
     const start = new Date(date);
     start.setHours(0, 0, 0, 0);
-
     const end = new Date(date);
     end.setHours(23, 59, 59, 999);
-
-    filters.date = {
-      $gte: start,
-      $lte: end,
-    };
-  }
-
-  // Date Range Filter
-  else {
+    filters.date = { $gte: start, $lte: end };
+  } else {
     if (startDate) {
-      filters.date = {
-        ...(filters.date || {}),
-        $gte: new Date(startDate),
-      };
+      filters.date = { ...(filters.date || {}), $gte: new Date(startDate) };
     }
-
     if (endDate) {
       const end = new Date(endDate);
       end.setHours(23, 59, 59, 999);
-
-      filters.date = {
-        ...(filters.date || {}),
-        $lte: end,
-      };
+      filters.date = { ...(filters.date || {}), $lte: end };
     }
   }
 
-  // Last X Days
   if (days) {
     const currentDate = getCurrentDate();
-
     filters.date = {
       ...(filters.date || {}),
       $gte: subDays(new Date(currentDate), Number(days)),
     };
   }
 
-  // Staff Name Search
   if (search) {
     const staffs = await Staff.find({
       office: req.admin.office,
-      fullName: {
-        $regex: search,
-        $options: 'i',
-      },
-    }).select('_id');
+      fullName: { $regex: search, $options: 'i' },
+    })
+      .select('_id')
+      .lean(); 
 
     filters.staff = {
       $in: staffs.map((s) => s._id),
@@ -462,8 +442,10 @@ export const getEntryExitLogs = expressAsyncHandler(async (req, res) => {
   }
 
   const entryExitLogs = await EntryExitLog.find(filters)
+    .select('office date staff slNo entryTime exitTime workingTime manual remarks') 
     .populate('staff', 'fullName staffId')
-    .sort({ date: -1, entryTime: -1 });
+    .sort({ date: -1, entryTime: -1 })
+    .lean(); 
 
   return new ApiResponse(200, entryExitLogs, 'Entry exit logs fetched successfully.').send(res);
 });

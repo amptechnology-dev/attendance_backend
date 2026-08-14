@@ -6,18 +6,15 @@ const entryExitLogSchema = new mongoose.Schema(
       type: mongoose.Schema.Types.ObjectId,
       ref: 'Office',
       required: true,
-      index: true,
     },
     date: {
       type: Date,
       required: true,
-      index: true,
     },
     staff: {
       type: mongoose.Schema.Types.ObjectId,
       ref: 'Staff',
       required: true,
-      index: true,
     },
     slNo: {
       type: Number,
@@ -41,5 +38,9 @@ const entryExitLogSchema = new mongoose.Schema(
   },
   { timestamps: true }
 );
+
+entryExitLogSchema.index({ office: 1, date: -1, entryTime: -1 });
+
+entryExitLogSchema.index({ staff: 1, date: 1, slNo: -1 });
 
 export const EntryExitLog = mongoose.model('EntryExitLog', entryExitLogSchema);

@@ -6,7 +6,6 @@ const AttendanceSchema = new mongoose.Schema(
       type: mongoose.Schema.Types.ObjectId,
       ref: 'Office',
       required: true,
-      index: true,
     },
     staffId: {
       type: mongoose.Schema.Types.ObjectId,
@@ -90,6 +89,8 @@ const AttendanceSchema = new mongoose.Schema(
 );
 
 AttendanceSchema.index({ office: 1, staffId: 1, date: 1 }, { unique: true });
+
+AttendanceSchema.index({ office: 1, date: -1, createdAt: -1 });
 
 AttendanceSchema.pre('save', function (next) {
   if (this.finalized) {
