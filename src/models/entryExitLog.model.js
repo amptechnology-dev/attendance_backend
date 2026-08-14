@@ -42,4 +42,7 @@ const entryExitLogSchema = new mongoose.Schema(
   { timestamps: true }
 );
 
+entryExitLogSchema.index({ office: 1, date: -1, entryTime: -1 });
+entryExitLogSchema.index({ staff: 1, date: -1 });
+
 export const EntryExitLog = mongoose.model('EntryExitLog', entryExitLogSchema);

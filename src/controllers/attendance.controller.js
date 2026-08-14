@@ -32,90 +32,76 @@ export const getAttendanceLogs = expressAsyncHandler(async (req, res) => {
     const end = new Date(date);
     end.setHours(23, 59, 59, 999);
 
-    filters.date = {
-      $gte: start,
-      $lte: end,
-    };
+    filters.date = { $gte: start, $lte: end };
   }
   // Date Range Filter
   else {
     if (startDate) {
-      filters.date = {
-        ...(filters.date || {}),
-        $gte: new Date(startDate),
-      };
+      filters.date = { ...(filters.date || {}), $gte: new Date(startDate) };
     }
-
     if (endDate) {
       const end = new Date(endDate);
       end.setHours(23, 59, 59, 999);
-
-      filters.date = {
-        ...(filters.date || {}),
-        $lte: end,
-      };
+      filters.date = { ...(filters.date || {}), $lte: end };
     }
   }
 
   // Last X Days
   if (days) {
     const currentDate = getCurrentDate();
-
     filters.date = {
       ...(filters.date || {}),
       $gte: subDays(new Date(currentDate), Number(days)),
     };
   }
 
-  let staffMatchFilter = {};
-
   // Permission Check
   const hasFullAccess =
     user.role?.permissions?.includes(permissions.ALL) ||
     user.role?.permissions?.includes(permissions.VIEW_ALL_ATTENDANCE);
 
-  if (!hasFullAccess) {
-    staffMatchFilter.department = user.department;
-  }
-
-  // Staff Search
-  if (search) {
-    const staffQuery = {
-      office: user.office,
-      fullName: {
-        $regex: search,
-        $options: 'i',
+  const pipeline = [
+    { $match: filters },
+    { $sort: { date: -1, createdAt: -1 } }, // lookup er AGE sort, index use hobe
+    {
+      $lookup: {
+        from: 'staffs', // Staff model er actual collection name check koro
+        let: { sid: '$staffId' },
+        pipeline: [
+          { $match: { $expr: { $eq: ['$_id', '$$sid'] } } },
+          { $project: { fullName: 1, staffId: 1, department: 1 } }, // department lagbe filter er jonno
+        ],
+        as: 'staffId',
       },
-    };
+    },
+    { $unwind: { path: '$staffId', preserveNullAndEmptyArrays: true } },
+  ];
 
-    if (!hasFullAccess) {
-      staffQuery.department = user.department;
-    }
-
-    const staffs = await Staff.find(staffQuery).select('_id');
-
-    staffMatchFilter.staffId = {
-      $in: staffs.map((staff) => staff._id),
-    };
-  } else if (!hasFullAccess) {
-    const staffs = await Staff.find({
-      office: user.office,
-      department: user.department,
-    }).select('_id');
-
-    staffMatchFilter.staffId = {
-      $in: staffs.map((staff) => staff._id),
-    };
+  if (!hasFullAccess) {
+    pipeline.push({ $match: { 'staffId.department': user.department } });
   }
 
-  const attendances = await Attendance.find({
-    ...filters,
-    ...staffMatchFilter,
-  })
-    .populate('staffId', 'fullName staffId')
-    .populate('logs')
-    .sort({ date: -1, createdAt: -1 })
-    .limit(limit && !isNaN(Number(limit)) ? Number(limit) : undefined);
+  if (search) {
+    pipeline.push({
+      $match: { 'staffId.fullName': { $regex: search, $options: 'i' } },
+    });
+  }
+
+  pipeline.push({
+    $lookup: {
+      from: 'entryexitlogs',
+      localField: 'logs',
+      foreignField: '_id',
+      as: 'logs',
+    },
+  });
+
+  // limit - sob filter er por, sobseshe
+  if (limit && !isNaN(Number(limit))) {
+    pipeline.push({ $limit: Number(limit) });
+  }
+
+  const attendances = await Attendance.aggregate(pipeline);
 
   return new ApiResponse(200, attendances, 'All attendance fetched successfully').send(res);
 });
@@ -507,7 +493,6 @@ export const bulkHrAdjustment = expressAsyncHandler(async (req, res) => {
 
   return new ApiResponse(200, updatedAttendances, 'HR adjustments updated successfully.').send(res);
 });
-
 
 export const getAllHolidayLeave = expressAsyncHandler(async (req, res) => {
   const holidayLeaves = await Leave.find({ office: req.admin.office, type: 'holidayLeave' })

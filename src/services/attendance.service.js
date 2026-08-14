@@ -319,13 +319,13 @@ const canAllowLateEntry = async (
   const lateAllowanceMs = lateAllowance * 60 * 1000;
   const entry = toMinutePrecision(entryTime);
   const start = toMinutePrecision(firstHalfStart);
-  // আসলেই late কিনা
+ 
   if (entry <= start) return true;
-  // Grace period (e.g. 60 min) এর বাইরে হলে সরাসরি না (কোনো quota তেই allow না)
+  
   if (entry > toMinutePrecision(new Date(start.getTime() + lateAllowanceMs))) return false;
 
   const { startDate } = getLocalMonthBoundariesFormatted(entryTime);
-  // FIX: শুধু আজকের আগের দিনগুলো count হবে, পুরো মাস না
+  
   const lateDaysCount = await Attendance.countDocuments({
     staffId,
     allowedLate: true,
@@ -354,7 +354,7 @@ export const getMissingAttendanceDates = async (office, month, year) => {
 
   let endDate = endOfMonth(requestedDate);
 
-  // Current month => Yesterday পর্যন্ত
+  // Current month => Yesterday porjonto
   if (
     selectedMonth === now.getMonth() &&
     selectedYear === now.getFullYear()
@@ -371,12 +371,12 @@ export const getMissingAttendanceDates = async (office, month, year) => {
       $gte: startDate,
       $lte: endDate,
     },
-  }).select('date');
+  })
+    .select('date -_id')
+    .lean();
 
   const calculatedDates = new Set(
-    calculations.map((item) =>
-      format(new Date(item.date), 'yyyy-MM-dd')
-    )
+    calculations.map((item) => format(item.date, 'yyyy-MM-dd'))
   );
 
   const allDates = eachDayOfInterval({

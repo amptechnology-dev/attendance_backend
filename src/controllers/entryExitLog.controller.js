@@ -410,60 +410,50 @@ export const getEntryExitLogs = expressAsyncHandler(async (req, res) => {
     const end = new Date(date);
     end.setHours(23, 59, 59, 999);
 
-    filters.date = {
-      $gte: start,
-      $lte: end,
-    };
+    filters.date = { $gte: start, $lte: end };
   }
-
   // Date Range Filter
   else {
     if (startDate) {
-      filters.date = {
-        ...(filters.date || {}),
-        $gte: new Date(startDate),
-      };
+      filters.date = { ...(filters.date || {}), $gte: new Date(startDate) };
     }
-
     if (endDate) {
       const end = new Date(endDate);
       end.setHours(23, 59, 59, 999);
-
-      filters.date = {
-        ...(filters.date || {}),
-        $lte: end,
-      };
+      filters.date = { ...(filters.date || {}), $lte: end };
     }
   }
 
   // Last X Days
   if (days) {
     const currentDate = getCurrentDate();
-
     filters.date = {
       ...(filters.date || {}),
       $gte: subDays(new Date(currentDate), Number(days)),
     };
   }
 
-  // Staff Name Search
-  if (search) {
-    const staffs = await Staff.find({
-      office: req.admin.office,
-      fullName: {
-        $regex: search,
-        $options: 'i',
+  const pipeline = [
+    { $match: filters },
+    { $sort: { date: -1, entryTime: -1 } },
+    {
+      $lookup: {
+        from: 'staffs',
+        let: { sid: '$staff' },
+        pipeline: [{ $match: { $expr: { $eq: ['$_id', '$$sid'] } } }, { $project: { fullName: 1, staffId: 1 } }],
+        as: 'staff',
       },
-    }).select('_id');
+    },
+    { $unwind: { path: '$staff', preserveNullAndEmptyArrays: true } },
+  ];
 
-    filters.staff = {
-      $in: staffs.map((s) => s._id),
-    };
+  if (search) {
+    pipeline.push({
+      $match: { 'staff.fullName': { $regex: search, $options: 'i' } },
+    });
   }
 
-  const entryExitLogs = await EntryExitLog.find(filters)
-    .populate('staff', 'fullName staffId')
-    .sort({ date: -1, entryTime: -1 });
+  const entryExitLogs = await EntryExitLog.aggregate(pipeline);
 
   return new ApiResponse(200, entryExitLogs, 'Entry exit logs fetched successfully.').send(res);
 });

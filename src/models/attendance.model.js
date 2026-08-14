@@ -90,6 +90,7 @@ const AttendanceSchema = new mongoose.Schema(
 );
 
 AttendanceSchema.index({ office: 1, staffId: 1, date: 1 }, { unique: true });
+AttendanceSchema.index({ office: 1, date: -1, createdAt: -1 });
 
 AttendanceSchema.pre('save', function (next) {
   if (this.finalized) {

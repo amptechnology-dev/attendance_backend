@@ -40,4 +40,10 @@ attendanceCalculationSchema.index(
   }
 );
 
+attendanceCalculationSchema.index({
+  office: 1,
+  locked: 1,
+  date: 1,
+});
+
 export const AttendanceCalculation = mongoose.model('AttendanceCalculation', attendanceCalculationSchema);
