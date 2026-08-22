@@ -1,12 +1,12 @@
 services:
   app:
     container_name: attendance-app
-    build: .
+    image: ghcr.io/amptechnology-dev/attendance_backend:latest
     env_file:
       - .env
     expose:
       - '8001'
-    command: sh -c "node src/index.js"   # match however main project starts
+    command: sh -c "node src/index.js"
     networks:
       - shared-nginx-net
     restart: unless-stopped
