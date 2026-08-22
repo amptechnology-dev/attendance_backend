@@ -8,7 +8,7 @@ const startServer = async () => {
     const port = process.env.PORT || 3001;
     app.listen(port, () => {
       logger.info(
-        `Server is running. \n Port: ${port}\n Mode: ${process.env.NODE_ENV}`
+        `Server is running...... \n Port: ${port}\n Mode: ${process.env.NODE_ENV}`
       );
     });
   } catch (error) {

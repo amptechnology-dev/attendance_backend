@@ -59,6 +59,7 @@ jobs:
           command_timeout: 10m
           script: |
             cd ~/attendance_backend
+            git pull origin master
             docker compose pull
             docker compose up -d
             docker image prune -f
