@@ -119,9 +119,6 @@ export const autoAttendanceCalculateByStaffId = async (office, staffId, date = n
         logs: [logs[0]._id],
         isLate,
         allowedLate,
-        // FIX: entry হওয়া মাত্রই যদি এটা off-day হয়, isOffDayWork সাথে সাথেই true —
-        // পুরো day complete হওয়ার জন্য অপেক্ষা করতে হবে না, নাহলে exit করার আগে
-        // কেউ interim state-এ থেকে গেলে এই flag miss হয়ে যেতে পারত।
         ...(isOffDay && { isOffDayWork: true }),
       },
       { upsert: true, new: true }
@@ -151,19 +148,23 @@ export const autoAttendanceCalculateByStaffId = async (office, staffId, date = n
     secondHalf = 'present';
     status = 'present';
   } else {
-    // ---------- Normal working day — Scenario 1-6 ----------
-    const firstHalfWorked = logs.some(
-      (log) =>
-        (toMinutePrecision(log.entryTime) <= toMinutePrecision(firstHalfStart) || allowedLate) &&
-        log.exitTime &&
-        toMinutePrecision(log.exitTime) >= toMinutePrecision(firstHalfEnd)
-    );
-    const secondHalfWorked = logs.some(
-      (log) =>
-        toMinutePrecision(log.entryTime) <= toMinutePrecision(secondHalfStart) &&
-        log.exitTime &&
-        toMinutePrecision(log.exitTime) >= toMinutePrecision(dayEnd)
-    );
+    // ===== CHANGE START =====
+    // Majher log gulo ignore. Shudhu prothom entry ar shesh exit diye hisab.
+    const firstEntry = logs[0].entryTime;
+    const lastExit = logs.reduce((max, log) => {
+      if (!log.exitTime) return max;
+      return !max || new Date(log.exitTime) > new Date(max) ? log.exitTime : max;
+    }, null);
+
+    const firstHalfWorked =
+      Boolean(lastExit) &&
+      (toMinutePrecision(firstEntry) <= toMinutePrecision(firstHalfStart) || allowedLate) &&
+      toMinutePrecision(lastExit) >= toMinutePrecision(firstHalfEnd);
+
+    const secondHalfWorked =
+      Boolean(lastExit) &&
+      toMinutePrecision(firstEntry) <= toMinutePrecision(secondHalfStart) &&
+      toMinutePrecision(lastExit) >= toMinutePrecision(dayEnd);
 
     firstHalf = firstHalfWorked ? 'present' : 'absent';
     secondHalf = secondHalfWorked ? 'present' : 'absent';
@@ -174,6 +175,7 @@ export const autoAttendanceCalculateByStaffId = async (office, staffId, date = n
         : firstHalf === 'present' || secondHalf === 'present'
           ? 'half-day'
           : 'present';
+    // ===== CHANGE END =====
   }
 
   // ---------- Off-day work benefit validity (assignment থাকলে — শুধুমাত্র formal validation-এর জন্য) ----------
@@ -202,10 +204,6 @@ export const autoAttendanceCalculateByStaffId = async (office, staffId, date = n
       logs: logs.map((log) => log._id),
       isLate,
       allowedLate,
-      // FIX (root cause): isOffDayWork এখন শুধু "আজ off-day ছিল এবং staff কাজ করেছে"
-      // এর উপর নির্ভর করে সেট হবে — formal OffDayWork assignment থাকা-না-থাকার উপর নয়।
-      // offDayAssignmentId / validOffDayWork আলাদা জিনিস — সেগুলো শুধু formal assignment
-      // থাকলেই সেট হবে (approval/validation-এর জন্য), isOffDayWork-এর pre-condition না।
       ...(isOffDay && {
         isOffDayWork: true,
         ...(isOffDayWorkAssigned && {
