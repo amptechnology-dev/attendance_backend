@@ -114,6 +114,14 @@ const SalaryStructureShema = new mongoose.Schema(
       },
     },
 
+    payableDays: {
+      mode: {
+        type: String,
+        enum: ['fixed', 'monthly'], // fixed = sob month e 30 din, monthly = calendar-er actual din
+        default: 'fixed',
+      },
+    },
+
     basicSalary: {
       calculationType: {
         type: String,

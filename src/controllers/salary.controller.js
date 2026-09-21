@@ -1,7 +1,7 @@
 import expressAsyncHandler from 'express-async-handler';
 import { ApiResponse, ApiError } from '../utils/responseHandler.js';
 import { SalaryStructure, Salary } from '../models/salary.model.js';
-import { autoCalculateAllSalary,freezeSalary } from '../services/salary.service.js';
+import { autoCalculateAllSalary, freezeSalary } from '../services/salary.service.js';
 import {
   saveAdvanceSalary,
   generateSalaryPdf,
@@ -23,10 +23,10 @@ import { startOfMonth, subMonths } from 'date-fns';
 import { requestSalaryUnfreezeOtp, verifySalaryUnfreezeOtp } from '../services/salary.service.js';
 import { validateBonusConfig } from '../services/bonus.service.js';
 
-
 export const putSalaryStructure = expressAsyncHandler(async (req, res) => {
   const {
     grossSalary,
+    payableDays,
     basicSalary,
     da,
     otherAllowance,
@@ -58,6 +58,9 @@ export const putSalaryStructure = expressAsyncHandler(async (req, res) => {
   if (basicSalary?.calculationType && !['onGross', 'onTotalSalary'].includes(basicSalary.calculationType)) {
     return new ApiResponse(400, null, 'Invalid basicSalary.calculationType value.').send(res);
   }
+  if (payableDays?.mode && !['fixed', 'monthly'].includes(payableDays.mode)) {
+    return new ApiResponse(400, null, 'Invalid payableDays.mode value.').send(res);
+  }
   if (hra?.enabled && !['basic', 'gross', 'basicPlusDa'].includes(hra.calculateOn)) {
     return new ApiResponse(400, null, 'Invalid hra.calculateOn value.').send(res);
   }
@@ -82,7 +85,6 @@ export const putSalaryStructure = expressAsyncHandler(async (req, res) => {
     }
   }
 
-  // Throws ApiError internally if invalid — caught by expressAsyncHandler's error forwarding
   validateBonusConfig(bonus);
 
   const updatedSalaryStructure = await SalaryStructure.findOneAndUpdate(
@@ -90,6 +92,7 @@ export const putSalaryStructure = expressAsyncHandler(async (req, res) => {
     {
       office: req.admin.office,
       grossSalary,
+      payableDays,
       basicSalary,
       da,
       otherAllowance,
@@ -448,5 +451,3 @@ export const getSalaryPdfByMonthConveyanceOT = expressAsyncHandler(async (req, r
   res.setHeader('Content-Disposition', 'inline; filename="payslip_conveyance_ot.pdf"');
   res.send(Buffer.from(pdfBuffer));
 });
-
-

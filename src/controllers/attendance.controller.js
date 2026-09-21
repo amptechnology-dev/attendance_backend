@@ -653,3 +653,13 @@ export const getMissingAttendanceReport = expressAsyncHandler(async (req, res) =
   const data = await getMissingAttendanceDates(req.admin.office, month, year);
   return new ApiResponse(200, data, 'Missing attendance report fetched successfully').send(res);
 });
+
+export const getSingleAttendanceLogs = expressAsyncHandler(async (req, res) => {
+  const attendance = await Attendance.findById(req.params.id).populate({
+    path: 'logs',
+    options: { sort: { entryTime: 1 } },
+  });
+  if (!attendance) throw new ApiError(404, 'Attendance not found');
+
+  return new ApiResponse(200, attendance.logs, 'Logs fetched successfully.').send(res);
+});

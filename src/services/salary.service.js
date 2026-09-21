@@ -146,6 +146,15 @@ const calculatePTax = (grossSalary) => {
   return 200;
 };
 
+const FIXED_PAYABLE_DAYS = 30;
+
+const resolvePayableDays = (salaryStructure, month, year) => {
+  if (salaryStructure.payableDays?.mode === 'monthly') {
+    return getDaysInMonth(new Date(year, month - 1));
+  }
+  return FIXED_PAYABLE_DAYS;
+};
+
 const autoCalculateAllSalaryByMonth = async (officeId, month, year) => {
   try {
     const alreadyCalculated = await SalaryCalculation.findOne({
@@ -169,7 +178,8 @@ const autoCalculateAllSalaryByMonth = async (officeId, month, year) => {
     ]);
     if (!staffList.length) throw new Error('No staff found for the given office.');
 
-    const daysInMonth = getDaysInMonth(new Date(year, month - 1));
+    const daysInMonth = resolvePayableDays(salaryStructure, month, year);
+    const isFixedPayableDays = salaryStructure.payableDays?.mode !== 'monthly';
     const dailyWorkHours = parseInt(dutyTiming.endTime.split(':')[0]) - parseInt(dutyTiming.startTime.split(':')[0]);
 
     const halfDayAllowed =
@@ -302,8 +312,7 @@ const autoCalculateAllSalaryByMonth = async (officeId, month, year) => {
 
         const totalUnpaidDays = totalUnpaidLeaves + holidayLeavesCount + unpaidHalfDays + totalUnpaidWeekOffDays;
 
-        // Actual payable days (fractional, e.g. 6.5 / 7.5) — money math er jonno
-        const rawWorkedDays =
+        const uncappedWorkedDays =
           totalFullDays +
           forgivenHalfDays +
           extraHalfDays * 0.5 +
@@ -311,13 +320,11 @@ const autoCalculateAllSalaryByMonth = async (officeId, month, year) => {
           totalWeekOffDays +
           totalOffDayWorkDays;
 
-        // W/D shown on payslip / register / pay details:
-        //  - manual conveyance mode: whole days only (6.5 -> 6, 7.5 -> 7), fraction er taka conveyance e jabe
-        //  - otherwise: ager moto-i
+        const rawWorkedDays = isFixedPayableDays ? Math.min(uncappedWorkedDays, daysInMonth) : uncappedWorkedDays;
+
         const workedDays = splitHalfDayToConveyance ? Math.floor(rawWorkedDays + 1e-9) : rawWorkedDays;
         const fractionDays = splitHalfDayToConveyance ? Math.max(0, rawWorkedDays - workedDays) : 0;
 
-        // paidDays = W/D shown (whole days in split mode). Per-day basic ei whole days er upor hobe.
         const paidDays = workedDays;
 
         const dailyRate = staff.monthlySalary / daysInMonth;

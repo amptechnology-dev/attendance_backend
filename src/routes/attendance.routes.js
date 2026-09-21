@@ -12,6 +12,7 @@ import {
   assignOffDayWork,
   getAllOffDayWorkAssigned,
   getMissingAttendanceReport,
+  getSingleAttendanceLogs
 } from '../controllers/attendance.controller.js';
 import { adminAuth, hasPermission } from '../middlewares/auth.middleware.js';
 import { permissions } from '../config/constants.js';
@@ -33,5 +34,6 @@ router
 router.route('/off-day-work/assign').post(hasPermission(permissions.MANAGE_ATTENDANCE), assignOffDayWork);
 router.route('/off-day-work/get').get(hasPermission(permissions.VIEW_ATTENDANCE), getAllOffDayWorkAssigned);
 router.route('/missing-attendance-report').get(hasPermission(permissions.VIEW_ATTENDANCE), getMissingAttendanceReport);
+router.route('/:id/logs').get(adminAuth, getSingleAttendanceLogs)
 
 export default router;

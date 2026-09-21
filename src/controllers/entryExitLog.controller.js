@@ -2,6 +2,7 @@ import expressAsyncHandler from 'express-async-handler';
 import { ApiResponse, ApiError } from '../utils/responseHandler.js';
 import { EntryExitLog } from '../models/entryExitLog.model.js';
 import { Staff } from '../models/staff.model.js';
+import { Attendance } from '../models/attendance.model.js';
 import { AttendanceCalculation } from '../models/attendanceCalculation.model.js';
 import { autoAttendanceCalculateByStaffId } from '../services/attendance.service.js';
 import { parseISO, isValid, format, subDays } from 'date-fns';
@@ -52,7 +53,8 @@ async function handleNewExit({ staff, exitTime, date, latestLog }) {
   return latestLog;
 }
 
-// ✅ Main controller to handle logs from agent
+const MIN_PUNCH_GAP_MS = 60 * 1000;
+
 export const newEntryExitLogsFromAgent = expressAsyncHandler(async (req, res) => {
   const { logs } = req.body;
 
@@ -88,14 +90,30 @@ export const newEntryExitLogsFromAgent = expressAsyncHandler(async (req, res) =>
         date,
       }).sort({ slNo: -1 });
 
+      // ⏱️ 1-MINUTE COOLDOWN CHECK
+      if (latestLog) {
+        const lastPunchTime = latestLog.exitTime || latestLog.entryTime;
+
+        if (lastPunchTime) {
+          const diffMs = Math.abs(timestamp.getTime() - new Date(lastPunchTime).getTime());
+
+          if (diffMs < MIN_PUNCH_GAP_MS) {
+            results.push({
+              success: true,
+              skipped: true,
+              reason: 'Duplicate punch within 1 minute ignored',
+              log,
+            });
+            continue;
+          }
+        }
+      }
+
       const deviceUniqueId = `${staff.office}_${log.deviceId}`;
 
       let finalLog;
 
-      // 🔥 MAIN LOGIC (ALTERNATE IN/OUT)
-
       if (!latestLog || latestLog.exitTime) {
-        // ✅ NEW ENTRY (IN)
         finalLog = await handleVeryNewEntry({
           staff,
           entryTime: timestamp,
@@ -105,7 +123,6 @@ export const newEntryExitLogsFromAgent = expressAsyncHandler(async (req, res) =>
           remarks: log.remarks || 'Pushed from local agent',
         });
       } else {
-        // ✅ EXIT (OUT)
         finalLog = await handleNewExit({
           staff,
           exitTime: timestamp,
@@ -122,7 +139,6 @@ export const newEntryExitLogsFromAgent = expressAsyncHandler(async (req, res) =>
       results.push({ success: false, error: err.message || 'Unknown error', log });
     }
   }
-
   return new ApiResponse(200, results, 'Batch logs processed successfully.').send(res);
 });
 
@@ -603,3 +619,5 @@ const handleExit = async ({ staff, time, date, latestLog }) => {
   await latestLog.save();
   return latestLog;
 };
+
+
