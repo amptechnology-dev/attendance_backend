@@ -225,21 +225,34 @@ export const getAllSalary = expressAsyncHandler(async (req, res) => {
 
 export const getPreviousMonthSalary = expressAsyncHandler(async (req, res) => {
   const now = new Date(getCurrentDate());
-  const previousMonthDate = subMonths(startOfMonth(now), 1);
-  const previousMonthNumber = previousMonthDate.getMonth() + 1; // getMonth is 0-based
-  const previousMonthYear = previousMonthDate.getFullYear();
+
+  let targetMonth = parseInt(req.query.month, 10);
+  let targetYear = parseInt(req.query.year, 10);
+
+  // month/year না পাঠালে আগের মতোই "previous month" ধরে নেবে (backward compatible)
+  if (
+    !targetMonth ||
+    !targetYear ||
+    targetMonth < 1 ||
+    targetMonth > 12 ||
+    Number.isNaN(targetYear)
+  ) {
+    const previousMonthDate = subMonths(startOfMonth(now), 1);
+    targetMonth = previousMonthDate.getMonth() + 1;
+    targetYear = previousMonthDate.getFullYear();
+  }
 
   const data = await Salary.find({
     office: req.admin.office,
-    month: previousMonthNumber,
-    year: previousMonthYear,
+    month: targetMonth,
+    year: targetYear,
   })
     .populate('staff', 'fullName staffId')
-    .lean(); // <-- prevents Mongoose from re-injecting schema defaults for $unset breakdown fields
+    .lean();
 
   data.sort((a, b) => (a.staff?.fullName || '').localeCompare(b.staff?.fullName || ''));
 
-  return new ApiResponse(200, data, 'Previous month salary fetched successfully.').send(res);
+  return new ApiResponse(200, data, 'Salary fetched successfully.').send(res);
 });
 
 export const getPastMonthSalary = expressAsyncHandler(async (req, res) => {

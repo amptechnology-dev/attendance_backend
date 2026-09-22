@@ -178,12 +178,9 @@ const autoCalculateAllSalaryByMonth = async (officeId, month, year) => {
     ]);
     if (!staffList.length) throw new Error('No staff found for the given office.');
 
-    // daysInMonth = shudhu dailyRate-er denominator (fixed mode-e 30, ba 'monthly' mode-e actual calendar days)
     const daysInMonth = resolvePayableDays(salaryStructure, month, year);
     const isFixedPayableDays = salaryStructure.payableDays?.mode !== 'monthly';
 
-    // FIX (30 vs 31): attendance cap-er jonno real calendar days lagbe, fixed 30 na —
-    // noyle fully-attended 31-din-er month-e W/D = 30 dekhabe (bug).
     const actualDaysInMonth = getDaysInMonth(new Date(year, month - 1));
 
     const dailyWorkHours = parseInt(dutyTiming.endTime.split(':')[0]) - parseInt(dutyTiming.startTime.split(':')[0]);
@@ -316,7 +313,6 @@ const autoCalculateAllSalaryByMonth = async (officeId, month, year) => {
           totalWeekOffDays +
           totalOffDayWorkDays;
 
-        // FIX: cap real calendar days diye, fixed 30 diye na
         const rawWorkedDays = isFixedPayableDays ? Math.min(uncappedWorkedDays, actualDaysInMonth) : uncappedWorkedDays;
 
         const workedDays = splitHalfDayToConveyance ? Math.floor(rawWorkedDays + 1e-9) : rawWorkedDays;
@@ -391,11 +387,14 @@ const autoCalculateAllSalaryByMonth = async (officeId, month, year) => {
           pfDeduction = (salaryStructure.pf.rate / 100) * pfWage;
         }
 
-        // FIX (ESI): eligibility check = baseSalary (jemon settings-e ache, e.g. 21500),
-        // kintu deduction amount ekhon grossSalary theke calculate hobe.
+        // FIX (ESI eligibility + base): ESI ekhon SHUDHU baseSalary (monthly salary)
+        // <= wageCeiling ei condition-er upor depend korbe. staff.esiNo thaka
+        // na-thaka ar eligibility decide korbe na. Deduction amount grossBase
+        // (= "Gross Wages", conveyance add howar AGE-r value) theke calculate hobe,
+        // Total Gross (grossSalary, conveyance shoho) theke na.
         let esiDeduction = 0;
-        if (salaryStructure.esi.enabled && staff.esiNo && baseSalary <= salaryStructure.esi.wageCeiling) {
-          esiDeduction = (salaryStructure.esi.rate / 100) * grossSalary;
+        if (salaryStructure.esi.enabled && baseSalary <= salaryStructure.esi.wageCeiling) {
+          esiDeduction = (salaryStructure.esi.rate / 100) * grossBase;
         }
 
         const pTax = salaryStructure.pTax.enabled ? calculatePTax(grossSalary) : 0;
@@ -470,8 +469,13 @@ const autoCalculateAllSalaryByMonth = async (officeId, month, year) => {
         if (salaryStructure.specialAllowance.enabled) setFields['breakdown.specialAllowance'] = specialAllowance;
         else unsetFields['breakdown.specialAllowance'] = '';
 
-        if (salaryStructure.esi.enabled && staff.esiNo) setFields['breakdown.esi'] = esiDeduction;
-        else unsetFields['breakdown.esi'] = '';
+        // FIX: ekhon staff.esiNo r check kora hocche na — shudhu structure enabled +
+        // baseSalary eligibility (jeta upore esiDeduction calculate korar shomoy check hoyeche).
+        if (salaryStructure.esi.enabled && baseSalary <= salaryStructure.esi.wageCeiling) {
+          setFields['breakdown.esi'] = esiDeduction;
+        } else {
+          unsetFields['breakdown.esi'] = '';
+        }
 
         if (salaryStructure.pf.enabled && staff.pfNo) setFields['breakdown.pf'] = pfDeduction;
         else unsetFields['breakdown.pf'] = '';
