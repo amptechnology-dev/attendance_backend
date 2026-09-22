@@ -178,23 +178,24 @@ const autoCalculateAllSalaryByMonth = async (officeId, month, year) => {
     ]);
     if (!staffList.length) throw new Error('No staff found for the given office.');
 
+    // daysInMonth = shudhu dailyRate-er denominator (fixed mode-e 30, ba 'monthly' mode-e actual calendar days)
     const daysInMonth = resolvePayableDays(salaryStructure, month, year);
     const isFixedPayableDays = salaryStructure.payableDays?.mode !== 'monthly';
+
+    // FIX (30 vs 31): attendance cap-er jonno real calendar days lagbe, fixed 30 na —
+    // noyle fully-attended 31-din-er month-e W/D = 30 dekhabe (bug).
+    const actualDaysInMonth = getDaysInMonth(new Date(year, month - 1));
+
     const dailyWorkHours = parseInt(dutyTiming.endTime.split(':')[0]) - parseInt(dutyTiming.startTime.split(':')[0]);
 
     const halfDayAllowed =
       Number.isFinite(dutyTiming.halfDayAllowed) && dutyTiming.halfDayAllowed >= 0 ? dutyTiming.halfDayAllowed : 2;
 
-    // NEW: manual (input) conveyance hole fractional day (0.5) er taka conveyance e jabe,
-    // ar W/D whole number e dekhabe. Onno mode e ager moto kaj korbe.
     const splitHalfDayToConveyance = Boolean(
       salaryStructure.conveyance?.enabled && salaryStructure.conveyance?.mode === 'input'
     );
 
-    // helper: normalize a date to a YYYY-MM-DD key so we can look up neighboring days
     const toDateKey = (date) => new Date(date).toISOString().slice(0, 10);
-
-    // helper: is this attendance record an "unadjusted Absent" (real absence, not HR-corrected)?
     const isUnadjustedAbsent = (record) => record?.status === 'absent' && record?.hrAdjustments?.adjustments === 'None';
 
     const results = await Promise.all(
@@ -216,7 +217,6 @@ const autoCalculateAllSalaryByMonth = async (officeId, month, year) => {
           date: { $gte: monthStartDate, $lte: monthEndDate },
         });
 
-        // sort + map by date so we can look up both the previous AND next day for the sandwich rule
         const sortedAttendance = [...attendanceData].sort((a, b) => new Date(a.date) - new Date(b.date));
         const attendanceByDate = new Map(sortedAttendance.map((a) => [toDateKey(a.date), a]));
 
@@ -227,9 +227,9 @@ const autoCalculateAllSalaryByMonth = async (officeId, month, year) => {
           totalPaidLeaves = 0,
           totalUnpaidLeaves = 0,
           totalHourlyDays = 0,
-          totalWeekOffDays = 0, // paid week-off / holiday days — counted in W/D
-          totalUnpaidWeekOffDays = 0, // sandwiched week-off / holiday — NOT counted in W/D
-          totalOffDayWorkDays = 0; // worked on a scheduled week-off/holiday (status present/half-day + isOffDayWork) — always full pay
+          totalWeekOffDays = 0,
+          totalUnpaidWeekOffDays = 0,
+          totalOffDayWorkDays = 0;
 
         sortedAttendance.forEach((attendance) => {
           if (attendance.hrAdjustments.adjustments !== 'None') {
@@ -260,16 +260,12 @@ const autoCalculateAllSalaryByMonth = async (officeId, month, year) => {
                 break;
             }
           } else if ((attendance.status === 'present' || attendance.status === 'half-day') && attendance.isOffDayWork) {
-            // this day was a scheduled week-off/holiday, but staff actually worked (P or HD) —
-            // gets FULL day salary regardless of P/HD, bypasses normal half-day forgiveness/leave logic.
             totalOffDayWorkDays++;
           } else if (attendance.status === 'full-day') {
             totalFullDays++;
           } else if (attendance.status === 'half-day') {
             totalHalfDays++;
           } else if (attendance.status === 'week-off' || attendance.status === 'holiday') {
-            // Sandwich rule: WO/Holiday is paid UNLESS the day right before OR right after
-            // is an unadjusted Absent — in that case this WO/Holiday itself becomes unpaid.
             const prevDate = new Date(attendance.date);
             prevDate.setDate(prevDate.getDate() - 1);
             const nextDate = new Date(attendance.date);
@@ -320,7 +316,8 @@ const autoCalculateAllSalaryByMonth = async (officeId, month, year) => {
           totalWeekOffDays +
           totalOffDayWorkDays;
 
-        const rawWorkedDays = isFixedPayableDays ? Math.min(uncappedWorkedDays, daysInMonth) : uncappedWorkedDays;
+        // FIX: cap real calendar days diye, fixed 30 diye na
+        const rawWorkedDays = isFixedPayableDays ? Math.min(uncappedWorkedDays, actualDaysInMonth) : uncappedWorkedDays;
 
         const workedDays = splitHalfDayToConveyance ? Math.floor(rawWorkedDays + 1e-9) : rawWorkedDays;
         const fractionDays = splitHalfDayToConveyance ? Math.max(0, rawWorkedDays - workedDays) : 0;
@@ -334,12 +331,10 @@ const autoCalculateAllSalaryByMonth = async (officeId, month, year) => {
 
         const baseSalary = staff.monthlySalary;
 
-        // ---------- GROSS SALARY (TOTAL — net salary er basis, ager moto-i thakbe) ----------
         let grossSalary;
         let leaveDeduction = 0;
 
         if (salaryStructure.grossSalary.calculationType === 'perDay') {
-          // total gross fractional days (rawWorkedDays) diye — taka kom/beshi hobe na
           grossSalary = Math.round(
             dailyRate * rawWorkedDays - totalHourlyDays * dailyRate + hourlyPay + overtimePay + bonus
           );
@@ -348,30 +343,23 @@ const autoCalculateAllSalaryByMonth = async (officeId, month, year) => {
           leaveDeduction = Math.min(dailyRate * totalUnpaidDays, baseSalary);
         }
 
-        // ---------- HALF-DAY -> CONVEYANCE SPLIT ----------
-        // 0.5 diner taka conveyance e jabe; baki (whole days) gross breakdown e thakbe.
-        // grossBase + halfDayConveyance = grossSalary, tai TOTAL GROSS / net change hoy na.
         const halfDayConveyance =
           fractionDays > 0 ? Math.min(Math.round(fractionDays * dailyRate), Math.max(grossSalary, 0)) : 0;
         const grossBase = grossSalary - halfDayConveyance;
 
-        // ---------- BASIC SALARY ----------
         let basic;
         if (salaryStructure.basicSalary.calculationType === 'onTotalSalary') {
           const basicDailyRate = ((salaryStructure.basicSalary.percentage / 100) * baseSalary) / daysInMonth;
-          basic = basicDailyRate * paidDays; // whole days
+          basic = basicDailyRate * paidDays;
         } else {
           basic = (salaryStructure.basicSalary.percentage / 100) * grossBase;
         }
 
-        // ---------- DA ----------
         const da = salaryStructure.da.enabled ? (salaryStructure.da.percentage / 100) * basic : 0;
-        // ---------- OTHER ALLOWANCE ----------
         const otherAllowance = salaryStructure.otherAllowance.enabled
           ? (salaryStructure.otherAllowance.percentage / 100) * basic
           : 0;
 
-        // ---------- HRA ----------
         let hra = 0;
         if (salaryStructure.hra.enabled) {
           const hraBase =
@@ -383,24 +371,19 @@ const autoCalculateAllSalaryByMonth = async (officeId, month, year) => {
           hra = (salaryStructure.hra.percentage / 100) * hraBase;
         }
 
-        // ---------- CONVEYANCE ----------
         let conveyance = 0;
         if (salaryStructure.conveyance.enabled) {
           if (salaryStructure.conveyance.mode === 'readonly') {
             conveyance = (salaryStructure.conveyance.percentage / 100) * grossBase;
           } else {
-            // Manual (input) mode: fractional day er taka auto conveyance e boshe.
-            // Admin pore manual update korle updateManualConveyanceForSalary oi value replace kore dey.
             conveyance = halfDayConveyance;
           }
         }
 
-        // ---------- SPECIAL ALLOWANCE ----------
         const specialAllowance = salaryStructure.specialAllowance.enabled
           ? Math.max(0, grossBase - basic - da - hra)
           : 0;
 
-        // ---------- PF ----------
         let pfDeduction = 0;
         if (salaryStructure.pf.enabled && staff.pfNo) {
           const pfBase = salaryStructure.pf.calculateOn === 'basicPlusDa' ? basic + da : basic;
@@ -408,16 +391,15 @@ const autoCalculateAllSalaryByMonth = async (officeId, month, year) => {
           pfDeduction = (salaryStructure.pf.rate / 100) * pfWage;
         }
 
-        // ---------- ESI ----------
+        // FIX (ESI): eligibility check = baseSalary (jemon settings-e ache, e.g. 21500),
+        // kintu deduction amount ekhon grossSalary theke calculate hobe.
         let esiDeduction = 0;
         if (salaryStructure.esi.enabled && staff.esiNo && baseSalary <= salaryStructure.esi.wageCeiling) {
-          esiDeduction = (salaryStructure.esi.rate / 100) * baseSalary;
+          esiDeduction = (salaryStructure.esi.rate / 100) * grossSalary;
         }
 
-        // ---------- PTAX (total gross er upor, ager moto) ----------
         const pTax = salaryStructure.pTax.enabled ? calculatePTax(grossSalary) : 0;
 
-        // ---------- LWF ----------
         let lwfDeduction = 0;
         if (salaryStructure.lwf.enabled) {
           let lwfBase;
@@ -433,7 +415,7 @@ const autoCalculateAllSalaryByMonth = async (officeId, month, year) => {
               break;
             case 'gross':
             default:
-              lwfBase = grossSalary; // total gross
+              lwfBase = grossSalary;
               break;
           }
           if (lwfBase <= salaryStructure.lwf.wageCeiling) {
@@ -445,7 +427,6 @@ const autoCalculateAllSalaryByMonth = async (officeId, month, year) => {
         totalDeductions = Math.min(totalDeductions, grossSalary);
         let netSalary = Math.round(grossSalary - totalDeductions);
 
-        // Deduct Advance
         let advanceDeduction = 0;
         if (netSalary >= staff.advanceSalary?.monthlyDeduction) {
           advanceDeduction = await deductAdvanceSalary(staff._id, month, year);
@@ -458,8 +439,8 @@ const autoCalculateAllSalaryByMonth = async (officeId, month, year) => {
         const setFields = {
           baseSalary,
           totalPayableDays: daysInMonth,
-          paidDays, // whole days in manual-conveyance mode
-          workedDays, // W/D shown everywhere (payslip, register, pay details, excel)
+          paidDays,
+          workedDays,
           attendanceDetails: { totalFullDays, totalHalfDays, totalHourPay, overtimeHours },
           leaves: {
             totalPaidLeaves,
@@ -469,7 +450,7 @@ const autoCalculateAllSalaryByMonth = async (officeId, month, year) => {
           },
           'breakdown.basic': basic,
           deductions: totalDeductions,
-          grossSalary, // TOTAL GROSS (whole days + half-day conveyance)
+          grossSalary,
           netSalary,
         };
         const unsetFields = {};
