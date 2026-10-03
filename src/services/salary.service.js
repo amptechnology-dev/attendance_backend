@@ -343,12 +343,13 @@ const autoCalculateAllSalaryByMonth = async (officeId, month, year) => {
           fractionDays > 0 ? Math.min(Math.round(fractionDays * dailyRate), Math.max(grossSalary, 0)) : 0;
         const grossBase = grossSalary - halfDayConveyance;
 
+        // ROUND OFF: basic
         let basic;
         if (salaryStructure.basicSalary.calculationType === 'onTotalSalary') {
           const basicDailyRate = ((salaryStructure.basicSalary.percentage / 100) * baseSalary) / daysInMonth;
-          basic = basicDailyRate * paidDays;
+          basic = Math.round(basicDailyRate * paidDays);
         } else {
-          basic = (salaryStructure.basicSalary.percentage / 100) * grossBase;
+          basic = Math.round((salaryStructure.basicSalary.percentage / 100) * grossBase);
         }
 
         const da = salaryStructure.da.enabled ? (salaryStructure.da.percentage / 100) * basic : 0;
@@ -356,6 +357,7 @@ const autoCalculateAllSalaryByMonth = async (officeId, month, year) => {
           ? (salaryStructure.otherAllowance.percentage / 100) * basic
           : 0;
 
+        // ROUND OFF: hra
         let hra = 0;
         if (salaryStructure.hra.enabled) {
           const hraBase =
@@ -364,7 +366,7 @@ const autoCalculateAllSalaryByMonth = async (officeId, month, year) => {
               : salaryStructure.hra.calculateOn === 'basicPlusDa'
                 ? basic + da
                 : basic;
-          hra = (salaryStructure.hra.percentage / 100) * hraBase;
+          hra = Math.round((salaryStructure.hra.percentage / 100) * hraBase);
         }
 
         let conveyance = 0;
@@ -380,21 +382,18 @@ const autoCalculateAllSalaryByMonth = async (officeId, month, year) => {
           ? Math.max(0, grossBase - basic - da - hra)
           : 0;
 
+        // ROUND OFF: pf
         let pfDeduction = 0;
         if (salaryStructure.pf.enabled && staff.pfNo) {
           const pfBase = salaryStructure.pf.calculateOn === 'basicPlusDa' ? basic + da : basic;
           const pfWage = Math.min(pfBase, salaryStructure.pf.wageCeiling);
-          pfDeduction = (salaryStructure.pf.rate / 100) * pfWage;
+          pfDeduction = Math.round((salaryStructure.pf.rate / 100) * pfWage);
         }
 
-        // FIX (ESI eligibility + base): ESI ekhon SHUDHU baseSalary (monthly salary)
-        // <= wageCeiling ei condition-er upor depend korbe. staff.esiNo thaka
-        // na-thaka ar eligibility decide korbe na. Deduction amount grossBase
-        // (= "Gross Wages", conveyance add howar AGE-r value) theke calculate hobe,
-        // Total Gross (grossSalary, conveyance shoho) theke na.
+        // ROUND OFF: esi (eligibility = baseSalary <= wageCeiling, amount grossBase theke)
         let esiDeduction = 0;
         if (salaryStructure.esi.enabled && baseSalary <= salaryStructure.esi.wageCeiling) {
-          esiDeduction = (salaryStructure.esi.rate / 100) * grossBase;
+          esiDeduction = Math.round((salaryStructure.esi.rate / 100) * grossBase);
         }
 
         const pTax = salaryStructure.pTax.enabled ? calculatePTax(grossSalary) : 0;
@@ -426,9 +425,9 @@ const autoCalculateAllSalaryByMonth = async (officeId, month, year) => {
         totalDeductions = Math.min(totalDeductions, grossSalary);
         let netSalary = Math.round(grossSalary - totalDeductions);
 
-        let advanceDeduction = 0;
-        if (netSalary >= staff.advanceSalary?.monthlyDeduction) {
-          advanceDeduction = await deductAdvanceSalary(staff._id, month, year);
+        const monthlyAdvanceDue = staff.advanceSalary?.monthlyDeduction ?? 0;
+        let advanceDeduction = await deductAdvanceSalary(staff._id, month, year, netSalary >= monthlyAdvanceDue);
+        if (advanceDeduction > 0) {
           totalDeductions += advanceDeduction;
           netSalary = Math.round(grossSalary - totalDeductions);
         }
@@ -469,8 +468,6 @@ const autoCalculateAllSalaryByMonth = async (officeId, month, year) => {
         if (salaryStructure.specialAllowance.enabled) setFields['breakdown.specialAllowance'] = specialAllowance;
         else unsetFields['breakdown.specialAllowance'] = '';
 
-        // FIX: ekhon staff.esiNo r check kora hocche na — shudhu structure enabled +
-        // baseSalary eligibility (jeta upore esiDeduction calculate korar shomoy check hoyeche).
         if (salaryStructure.esi.enabled && baseSalary <= salaryStructure.esi.wageCeiling) {
           setFields['breakdown.esi'] = esiDeduction;
         } else {
@@ -880,22 +877,32 @@ export const saveAdvanceSalary = async (staffId, totalAmount, remainingAmount, r
 };
 */
 // Deduct advance salary
-async function deductAdvanceSalary(staffId, month = null, year = null) {
+async function deductAdvanceSalary(staffId, month = null, year = null, allowNewDeduction = true) {
   const staff = await Staff.findById(staffId);
+  if (!staff) return 0;
+
+  // Ei month e ager joto deduction hoyeche (ekta month e ekadhik advance-er deduction thakte pare)
+  const existingDeductions = await AdvanceTransaction.find({
+    staff: staffId,
+    type: 'deduct',
+    month,
+    year,
+  }).lean();
+  const alreadyDeducted = existingDeductions.reduce((sum, t) => sum + (t.amount || 0), 0);
+
   const adv = staff.advanceSalary;
 
-  if (!adv || !adv.remainingAmount || adv.remainingMonths <= 0) {
-    return 0;
+  if (!allowNewDeduction || !adv || !adv.remainingAmount || adv.remainingMonths <= 0) {
+    return alreadyDeducted;
   }
 
   const currentPeriod = year * 12 + (month - 1);
 
   if (adv.startYear && adv.startMonth) {
     const startPeriod = adv.startYear * 12 + (adv.startMonth - 1);
-    if (currentPeriod < startPeriod) return 0;
+    if (currentPeriod < startPeriod) return alreadyDeducted;
   }
 
-  // শুধু এই নির্দিষ্ট মাসটা paused list-এ আছে কিনা চেক করছে
   const isPausedThisMonth = (adv.pausedMonths || []).some((p) => p.month === month && p.year === year);
   if (isPausedThisMonth) {
     const alreadyLogged = await AdvanceTransaction.findOne({
@@ -920,17 +927,19 @@ async function deductAdvanceSalary(staffId, month = null, year = null) {
         logger.error('Error while logging paused advance month:', error);
       }
     }
-    return 0;
+    return alreadyDeducted;
   }
 
-  const existingDeduction = await AdvanceTransaction.findOne({
-    staff: staffId,
-    type: 'deduct',
-    month,
-    year,
-  });
-  if (existingDeduction) {
-    return existingDeduction.amount;
+  // Current advance er deduction ei month e ager-i hoyeche kina?
+  // Latest 'add' er por je deduction hoyeche shetai current advance er.
+  // Er age-r deduction purono advance er, seta notun advance ke block korbe na.
+  const latestAdd = await AdvanceTransaction.findOne({ staff: staffId, type: 'add' }).sort({ createdAt: -1 }).lean();
+
+  const currentAdvanceAlreadyDeducted = existingDeductions.some(
+    (t) => !latestAdd || new Date(t.createdAt) >= new Date(latestAdd.createdAt)
+  );
+  if (currentAdvanceAlreadyDeducted) {
+    return alreadyDeducted;
   }
 
   const deduction = Math.min(adv.monthlyDeduction, adv.remainingAmount);
@@ -956,10 +965,9 @@ async function deductAdvanceSalary(staffId, month = null, year = null) {
     });
   } catch (error) {
     logger.error('Error while saving advance transaction:', error);
-    return 0;
   }
 
-  return deduction;
+  return alreadyDeducted + deduction;
 }
 
 function getPtax(salary) {
@@ -1009,34 +1017,18 @@ export const generateSalaryPdf = async (officeId, staffId, month, year) => {
   doc.setFontSize(10);
   doc.text(salary.office?.name, pageWidth / 2, 15, { align: 'center' });
 
-  // ================================================================
-  // Column order fixed to match the office's printed pay-slip format:
-  // Name, Rate, W/D, BASIC, DA, HRA, SPL ALLOW, Other Allowance,
-  // Gross Wages, CONV, TOTAL GROSS, PF, ESI, P TAX, LWF, ADV., TD, Net Amt.
-  //
-  // - Each optional column only renders when its toggle is enabled in
-  //   Salary Structure settings; disabled ones never appear (not even
-  //   as 0), so the printed layout matches whichever components this
-  //   office actually uses.
-  // - ADV. is always shown: breakdown.advanceDeduction is a real
-  //   schema field with `default: 0`, so it's read straight from the
-  //   DB rather than conditionally hidden.
-  // - TD = Total Deduction, backed by Salary.deductions (already sums
-  //   PF + ESI + PTax + LWF + leave deduction + advance deduction).
-  //   Always shown, same reasoning as ADV.
-  // ================================================================
   const columnDefs = [
     { header: 'Name', getValue: (s) => s.staff?.fullName || '-' },
     { header: 'Rate', getValue: (s) => Math.round(s.baseSalary / s.totalPayableDays) },
     { header: 'W/D', getValue: (s) => s.workedDays ?? 0 },
-    { header: 'BASIC', getValue: (s) => safeToFixed(s.breakdown?.basic) },
+    { header: 'BASIC', getValue: (s) => safeRound(s.breakdown?.basic) },
   ];
 
   if (salaryStructure.da?.enabled) {
     columnDefs.push({ header: 'DA', getValue: (s) => safeToFixed(s.breakdown?.da) });
   }
   if (salaryStructure.hra?.enabled) {
-    columnDefs.push({ header: 'HRA', getValue: (s) => safeToFixed(s.breakdown?.hra) });
+    columnDefs.push({ header: 'HRA', getValue: (s) => safeRound(s.breakdown?.hra) });
   }
   if (salaryStructure.specialAllowance?.enabled) {
     columnDefs.push({ header: 'SPL ALLOW', getValue: (s) => safeToFixed(s.breakdown?.specialAllowance) });
@@ -1045,30 +1037,22 @@ export const generateSalaryPdf = async (officeId, staffId, month, year) => {
     columnDefs.push({ header: 'Other Allowance', getValue: (s) => safeToFixed(s.breakdown?.otherAllowance) });
   }
 
-  // Gross Wages = earnings before conveyance is folded in
   columnDefs.push({
     header: 'Gross Wages',
-    getValue: (s) =>
-      safeToFixed(
-        (s.breakdown?.basic ?? 0) +
-          (s.breakdown?.da ?? 0) +
-          (s.breakdown?.hra ?? 0) +
-          (s.breakdown?.otherAllowance ?? 0) +
-          (s.breakdown?.specialAllowance ?? 0)
-      ),
+    getValue: (s) => safeRound(getGrossWages(s)),
   });
 
   if (salaryStructure.conveyance?.enabled) {
     columnDefs.push({ header: 'CONV', getValue: (s) => safeToFixed(s.breakdown?.conveyance) });
   }
 
-  columnDefs.push({ header: 'TOTAL GROSS', getValue: (s) => safeToFixed(s.grossSalary) });
+  columnDefs.push({ header: 'TOTAL GROSS', getValue: (s) => safeRound(s.grossSalary) });
 
   if (salaryStructure.pf?.enabled) {
-    columnDefs.push({ header: 'PF', getValue: (s) => safeToFixed(s.breakdown?.pf) });
+    columnDefs.push({ header: 'PF', getValue: (s) => safeRound(s.breakdown?.pf) });
   }
   if (salaryStructure.esi?.enabled) {
-    columnDefs.push({ header: 'ESI', getValue: (s) => safeToFixed(s.breakdown?.esi) });
+    columnDefs.push({ header: 'ESI', getValue: (s) => safeRound(s.breakdown?.esi) });
   }
   if (salaryStructure.pTax?.enabled) {
     columnDefs.push({ header: 'P TAX', getValue: (s) => safeToFixed(s.breakdown?.pTax) });
@@ -1077,7 +1061,6 @@ export const generateSalaryPdf = async (officeId, staffId, month, year) => {
     columnDefs.push({ header: 'LWF', getValue: (s) => safeToFixed(s.breakdown?.lwf) });
   }
 
-  // Always shown — real schema field with a default, not a toggle.
   columnDefs.push({ header: 'ADV.', getValue: (s) => safeToFixed(s.breakdown?.advanceDeduction) });
 
   if (salaryStructure.overtime?.enabled) {
@@ -1131,6 +1114,23 @@ const safeToFixed = (value, decimals = 2) => {
   return Number(value).toFixed(decimals);
 };
 
+// Whole-rupee display (no decimals)
+const safeRound = (value) => {
+  if (value === undefined || value === null || isNaN(value)) return '0';
+  return String(Math.round(Number(value)));
+};
+
+// Numeric round (Excel / table er jonno)
+const roundInt = (v) => Math.round(Number(v) || 0);
+
+// Gross Wages = conveyance er age-er earnings
+const getGrossWages = (s) =>
+  (s.breakdown?.basic ?? 0) +
+  (s.breakdown?.da ?? 0) +
+  (s.breakdown?.hra ?? 0) +
+  (s.breakdown?.otherAllowance ?? 0) +
+  (s.breakdown?.specialAllowance ?? 0);
+
 export const generateSalaryByMonth = async (officeId, month, year) => {
   const [salaries, salaryStructure] = await Promise.all([
     Salary.find({ office: officeId, month, year })
@@ -1151,19 +1151,18 @@ export const generateSalaryByMonth = async (officeId, month, year) => {
   const pageHeight = doc.internal.pageSize.height || doc.internal.pageSize.getHeight();
   const pageWidth = doc.internal.pageSize.width || doc.internal.pageSize.getWidth();
 
-  // Same fixed column order as generateSalaryPdf (see comments there).
   const columnDefs = [
     { header: 'Name', getValue: (s) => s.staff?.fullName || '-' },
     { header: 'Rate', getValue: (s) => s.baseSalary },
     { header: 'W/D', getValue: (s) => s.workedDays ?? 0 },
-    { header: 'BASIC', getValue: (s) => safeToFixed(s.breakdown?.basic) },
+    { header: 'BASIC', getValue: (s) => safeRound(s.breakdown?.basic) },
   ];
 
   if (salaryStructure.da?.enabled) {
     columnDefs.push({ header: 'DA', getValue: (s) => safeToFixed(s.breakdown?.da) });
   }
   if (salaryStructure.hra?.enabled) {
-    columnDefs.push({ header: 'HRA', getValue: (s) => safeToFixed(s.breakdown?.hra) });
+    columnDefs.push({ header: 'HRA', getValue: (s) => safeRound(s.breakdown?.hra) });
   }
   if (salaryStructure.specialAllowance?.enabled) {
     columnDefs.push({ header: 'SPL ALLOW', getValue: (s) => safeToFixed(s.breakdown?.specialAllowance) });
@@ -1174,27 +1173,20 @@ export const generateSalaryByMonth = async (officeId, month, year) => {
 
   columnDefs.push({
     header: 'Gross Wages',
-    getValue: (s) =>
-      safeToFixed(
-        (s.breakdown?.basic ?? 0) +
-          (s.breakdown?.da ?? 0) +
-          (s.breakdown?.hra ?? 0) +
-          (s.breakdown?.otherAllowance ?? 0) +
-          (s.breakdown?.specialAllowance ?? 0)
-      ),
+    getValue: (s) => safeRound(getGrossWages(s)),
   });
 
   if (salaryStructure.conveyance?.enabled) {
     columnDefs.push({ header: 'CONV', getValue: (s) => safeToFixed(s.breakdown?.conveyance) });
   }
 
-  columnDefs.push({ header: 'TOTAL GROSS', getValue: (s) => safeToFixed(s.grossSalary) });
+  columnDefs.push({ header: 'TOTAL GROSS', getValue: (s) => safeRound(s.grossSalary) });
 
   if (salaryStructure.pf?.enabled) {
-    columnDefs.push({ header: 'PF', getValue: (s) => safeToFixed(s.breakdown?.pf) });
+    columnDefs.push({ header: 'PF', getValue: (s) => safeRound(s.breakdown?.pf) });
   }
   if (salaryStructure.esi?.enabled) {
-    columnDefs.push({ header: 'ESI', getValue: (s) => safeToFixed(s.breakdown?.esi) });
+    columnDefs.push({ header: 'ESI', getValue: (s) => safeRound(s.breakdown?.esi) });
   }
   if (salaryStructure.pTax?.enabled) {
     columnDefs.push({ header: 'P TAX', getValue: (s) => safeToFixed(s.breakdown?.pTax) });
@@ -1404,12 +1396,7 @@ export const generateSalaryExcelByMonth = async (officeId, month, year, filters 
   let rowIndex = firstDataRow;
 
   salaries.forEach((s, i) => {
-    const gross =
-      (s.breakdown?.basic ?? 0) +
-      (s.breakdown?.da ?? 0) +
-      (s.breakdown?.hra ?? 0) +
-      (s.breakdown?.otherAllowance ?? 0) +
-      (s.breakdown?.specialAllowance ?? 0);
+    const gross = getGrossWages(s);
 
     const rowData = {
       slNo: i + 1,
@@ -1417,15 +1404,15 @@ export const generateSalaryExcelByMonth = async (officeId, month, year, filters 
       department: s.staff?.department?.name || '-',
       rate: s.baseSalary,
       nod: s.workedDays ?? 0,
-      basic: round2(s.breakdown?.basic),
-      hra: round2(s.breakdown?.hra),
+      basic: roundInt(s.breakdown?.basic),
+      hra: roundInt(s.breakdown?.hra),
       splAllowance: round2(s.breakdown?.specialAllowance),
       otherAllowance: round2(s.breakdown?.otherAllowance),
-      gross: round2(gross),
+      gross: roundInt(gross),
       conv: round2(s.breakdown?.conveyance),
-      totalGross: round2(s.grossSalary),
-      pf: round2(s.breakdown?.pf),
-      esi: round2(s.breakdown?.esi),
+      totalGross: roundInt(s.grossSalary),
+      pf: roundInt(s.breakdown?.pf),
+      esi: roundInt(s.breakdown?.esi),
       pTax: round2(s.breakdown?.pTax),
       lwf: round2(s.breakdown?.lwf),
       lessAdvance: round2(s.breakdown?.advanceDeduction),
@@ -1479,7 +1466,6 @@ export const generateSalaryExcelByMonth = async (officeId, month, year, filters 
 export const getSalaryTableByMonth = async (officeId, month, year, filters = {}) => {
   const { departmentId, pfStatus } = filters; // pfStatus: 'all' | 'withPF' | 'withoutPF'
 
-  // ---- Resolve which staff match the filters first ----
   const staffMatch = { office: officeId };
   if (departmentId && departmentId !== 'all') {
     staffMatch.department = departmentId;
@@ -1498,7 +1484,7 @@ export const getSalaryTableByMonth = async (officeId, month, year, filters = {})
       .populate({
         path: 'staff',
         select: 'fullName pfNo esiNo department',
-        populate: { path: 'department', select: 'name' }, // adjust field name if different
+        populate: { path: 'department', select: 'name' },
       })
       .lean(),
     SalaryStructure.findOne({ office: officeId }).lean(),
@@ -1559,12 +1545,7 @@ export const getSalaryTableByMonth = async (officeId, month, year, filters = {})
   columnDefs.push({ header: 'NET', key: 'net', summable: true });
 
   const rows = salaries.map((s, i) => {
-    const gross =
-      (s.breakdown?.basic ?? 0) +
-      (s.breakdown?.da ?? 0) +
-      (s.breakdown?.hra ?? 0) +
-      (s.breakdown?.otherAllowance ?? 0) +
-      (s.breakdown?.specialAllowance ?? 0);
+    const gross = getGrossWages(s);
 
     return {
       slNo: i + 1,
@@ -1572,15 +1553,15 @@ export const getSalaryTableByMonth = async (officeId, month, year, filters = {})
       department: s.staff?.department?.name || '-',
       rate: s.baseSalary,
       nod: s.workedDays ?? 0,
-      basic: round2(s.breakdown?.basic),
-      hra: round2(s.breakdown?.hra),
+      basic: roundInt(s.breakdown?.basic),
+      hra: roundInt(s.breakdown?.hra),
       splAllowance: round2(s.breakdown?.specialAllowance),
       otherAllowance: round2(s.breakdown?.otherAllowance),
-      gross: round2(gross),
+      gross: roundInt(gross),
       conv: round2(s.breakdown?.conveyance),
-      totalGross: round2(s.grossSalary),
-      pf: round2(s.breakdown?.pf),
-      esi: round2(s.breakdown?.esi),
+      totalGross: roundInt(s.grossSalary),
+      pf: roundInt(s.breakdown?.pf),
+      esi: roundInt(s.breakdown?.esi),
       pTax: round2(s.breakdown?.pTax),
       lwf: round2(s.breakdown?.lwf),
       lessAdvance: round2(s.breakdown?.advanceDeduction),
@@ -1632,19 +1613,17 @@ export const generateSalaryRegisterPdf = async (officeId, month, year, filters =
 
   const officeName = salaries[0].office?.name || '';
 
-  // Same conditional column set as the Excel register — kept in sync
-  // so PDF, Excel, and the web preview always show identical columns.
   const columnDefs = [
     { header: 'SL NO', getValue: (_s, i) => i + 1 },
     { header: 'NAME', getValue: (s) => s.staff?.fullName || '-' },
     { header: 'DEPARTMENT', getValue: (s) => s.staff?.department?.name || '-' },
     { header: 'RATE', getValue: (s) => s.baseSalary },
     { header: 'NOD', getValue: (s) => s.workedDays ?? 0 },
-    { header: 'BASIC', getValue: (s) => safeToFixed(s.breakdown?.basic) },
+    { header: 'BASIC', getValue: (s) => safeRound(s.breakdown?.basic) },
   ];
 
   if (salaryStructure.hra?.enabled) {
-    columnDefs.push({ header: 'HRA', getValue: (s) => safeToFixed(s.breakdown?.hra) });
+    columnDefs.push({ header: 'HRA', getValue: (s) => safeRound(s.breakdown?.hra) });
   }
   if (salaryStructure.specialAllowance?.enabled) {
     columnDefs.push({ header: 'SPL ALLOW', getValue: (s) => safeToFixed(s.breakdown?.specialAllowance) });
@@ -1655,27 +1634,20 @@ export const generateSalaryRegisterPdf = async (officeId, month, year, filters =
 
   columnDefs.push({
     header: 'Gross Wages',
-    getValue: (s) =>
-      safeToFixed(
-        (s.breakdown?.basic ?? 0) +
-          (s.breakdown?.da ?? 0) +
-          (s.breakdown?.hra ?? 0) +
-          (s.breakdown?.otherAllowance ?? 0) +
-          (s.breakdown?.specialAllowance ?? 0)
-      ),
+    getValue: (s) => safeRound(getGrossWages(s)),
   });
 
   if (salaryStructure.conveyance?.enabled) {
     columnDefs.push({ header: 'CONV', getValue: (s) => safeToFixed(s.breakdown?.conveyance) });
   }
 
-  columnDefs.push({ header: 'TOTAL GROSS', getValue: (s) => safeToFixed(s.grossSalary) });
+  columnDefs.push({ header: 'TOTAL GROSS', getValue: (s) => safeRound(s.grossSalary) });
 
   if (salaryStructure.pf?.enabled) {
-    columnDefs.push({ header: 'PF', getValue: (s) => safeToFixed(s.breakdown?.pf) });
+    columnDefs.push({ header: 'PF', getValue: (s) => safeRound(s.breakdown?.pf) });
   }
   if (salaryStructure.esi?.enabled) {
-    columnDefs.push({ header: 'ESI', getValue: (s) => safeToFixed(s.breakdown?.esi) });
+    columnDefs.push({ header: 'ESI', getValue: (s) => safeRound(s.breakdown?.esi) });
   }
   if (salaryStructure.pTax?.enabled) {
     columnDefs.push({ header: 'P TAX', getValue: (s) => safeToFixed(s.breakdown?.pTax) });
@@ -1713,7 +1685,7 @@ export const generateSalaryRegisterPdf = async (officeId, month, year, filters =
     theme: 'grid',
     styles: { fontSize: 7, cellPadding: 1.5 },
     headStyles: { fillColor: [46, 134, 171], fontSize: 7 },
-    showHead: 'everyPage', // header repeats automatically on every new page
+    showHead: 'everyPage',
     didDrawPage: (data) => {
       doc.setFontSize(8);
       const generatedDate = `Generated: ${new Date().toLocaleDateString()} ${new Date().toLocaleTimeString()}`;
@@ -2005,8 +1977,6 @@ export const generateSalaryByMonthConveyanceOT = async (officeId, month, year) =
   return doc.output('arraybuffer');
 };
 
-// Shared column builder for both single-staff & by-month CONV+OT variants
-// so both stay in sync automatically — change once, both PDFs update.
 function buildConveyanceOTColumnDefs(salaryStructure, singleStaffRateFormula) {
   const columnDefs = [
     { header: 'Name', getValue: (s) => s.staff?.fullName || '-' },
@@ -2015,14 +1985,14 @@ function buildConveyanceOTColumnDefs(salaryStructure, singleStaffRateFormula) {
       getValue: (s) => (singleStaffRateFormula ? Math.round(s.baseSalary / s.totalPayableDays) : s.baseSalary),
     },
     { header: 'W/D', getValue: (s) => s.workedDays ?? 0 },
-    { header: 'BASIC', getValue: (s) => safeToFixed(s.breakdown?.basic) },
+    { header: 'BASIC', getValue: (s) => safeRound(s.breakdown?.basic) },
   ];
 
   if (salaryStructure.da?.enabled) {
     columnDefs.push({ header: 'DA', getValue: (s) => safeToFixed(s.breakdown?.da) });
   }
   if (salaryStructure.hra?.enabled) {
-    columnDefs.push({ header: 'HRA', getValue: (s) => safeToFixed(s.breakdown?.hra) });
+    columnDefs.push({ header: 'HRA', getValue: (s) => safeRound(s.breakdown?.hra) });
   }
   if (salaryStructure.specialAllowance?.enabled) {
     columnDefs.push({ header: 'SPL ALLOW', getValue: (s) => safeToFixed(s.breakdown?.specialAllowance) });
@@ -2033,30 +2003,22 @@ function buildConveyanceOTColumnDefs(salaryStructure, singleStaffRateFormula) {
 
   columnDefs.push({
     header: 'Gross Wages',
-    getValue: (s) =>
-      safeToFixed(
-        (s.breakdown?.basic ?? 0) +
-          (s.breakdown?.da ?? 0) +
-          (s.breakdown?.hra ?? 0) +
-          (s.breakdown?.otherAllowance ?? 0) +
-          (s.breakdown?.specialAllowance ?? 0)
-      ),
+    getValue: (s) => safeRound(getGrossWages(s)),
   });
 
-  // CONV always shown here (not gated behind salaryStructure.conveyance.enabled)
-  // because OT needs a column to sit in even when conveyance itself is off.
+  // CONV always shown here (OT er jonno column lagbe, conveyance off thakleo)
   columnDefs.push({
     header: 'CONV',
     getValue: (s) => safeToFixed((s.breakdown?.conveyance ?? 0) + (s.breakdown?.overtime ?? 0)),
   });
 
-  columnDefs.push({ header: 'TOTAL GROSS', getValue: (s) => safeToFixed(s.grossSalary) });
+  columnDefs.push({ header: 'TOTAL GROSS', getValue: (s) => safeRound(s.grossSalary) });
 
   if (salaryStructure.pf?.enabled) {
-    columnDefs.push({ header: 'PF', getValue: (s) => safeToFixed(s.breakdown?.pf) });
+    columnDefs.push({ header: 'PF', getValue: (s) => safeRound(s.breakdown?.pf) });
   }
   if (salaryStructure.esi?.enabled) {
-    columnDefs.push({ header: 'ESI', getValue: (s) => safeToFixed(s.breakdown?.esi) });
+    columnDefs.push({ header: 'ESI', getValue: (s) => safeRound(s.breakdown?.esi) });
   }
   if (salaryStructure.pTax?.enabled) {
     columnDefs.push({ header: 'P TAX', getValue: (s) => safeToFixed(s.breakdown?.pTax) });
