@@ -230,13 +230,7 @@ export const getPreviousMonthSalary = expressAsyncHandler(async (req, res) => {
   let targetYear = parseInt(req.query.year, 10);
 
   // month/year না পাঠালে আগের মতোই "previous month" ধরে নেবে (backward compatible)
-  if (
-    !targetMonth ||
-    !targetYear ||
-    targetMonth < 1 ||
-    targetMonth > 12 ||
-    Number.isNaN(targetYear)
-  ) {
+  if (!targetMonth || !targetYear || targetMonth < 1 || targetMonth > 12 || Number.isNaN(targetYear)) {
     const previousMonthDate = subMonths(startOfMonth(now), 1);
     targetMonth = previousMonthDate.getMonth() + 1;
     targetYear = previousMonthDate.getFullYear();
@@ -357,10 +351,45 @@ export const getSalaryRegisterPdfByMonth = expressAsyncHandler(async (req, res) 
 });
 
 export const getAdvanceSalaryTransactions = expressAsyncHandler(async (req, res) => {
-  const data = await AdvanceTransaction.find({ office: req.admin.office })
+  const { month, year, fromDate, toDate, type, staffId } = req.query;
+
+  const query = { office: req.admin.office };
+  const and = [];
+
+  if (staffId) query.staff = staffId;
+  if (type && type !== 'all') query.type = type;
+
+  // Month-wise filter: salary month/year match kore, OR transaction ei mase create hoyeche
+  const m = parseInt(month, 10);
+  const y = parseInt(year, 10);
+  if (m >= 1 && m <= 12 && !Number.isNaN(y)) {
+    const start = new Date(y, m - 1, 1);
+    const end = new Date(y, m, 1);
+    and.push({
+      $or: [{ month: m, year: y }, { createdAt: { $gte: start, $lt: end } }],
+    });
+  }
+
+  // Date-wise filter (createdAt)
+  const createdAtRange = {};
+  if (fromDate) {
+    const from = new Date(`${fromDate}T00:00:00`);
+    if (!Number.isNaN(from.getTime())) createdAtRange.$gte = from;
+  }
+  if (toDate) {
+    const to = new Date(`${toDate}T23:59:59.999`);
+    if (!Number.isNaN(to.getTime())) createdAtRange.$lte = to;
+  }
+  if (Object.keys(createdAtRange).length) and.push({ createdAt: createdAtRange });
+
+  if (and.length) query.$and = and;
+
+  const data = await AdvanceTransaction.find(query)
     .populate('staff', 'fullName staffId')
     .sort({ createdAt: -1 })
-    .limit(1000);
+    .limit(1000)
+    .lean();
+
   return new ApiResponse(200, data, 'Advance salary transactions fetched successfully.').send(res);
 });
 
