@@ -22,6 +22,11 @@ import {
   generateHolidayFundReport,
   generateHolidayFundReportPdf,
   generateHolidayFundReportCsv,
+  generateAdvanceReport,
+  getAdvanceDetail,
+  generateAdvanceReportPdf,
+  generateAdvanceReportExcel,
+  generateAdvanceDetailPdf
 } from '../../services/report.service.js';
 import { Office } from '../../models/office.model.js';
 import { getMonthBoundariesFormatted } from '../../utils/dateTime.utils.js';
@@ -319,4 +324,61 @@ export const getHolidayFundReportCsv = expressAsyncHandler(async (req, res) => {
   } catch (error) {
     throw new ApiError(400, error.message, error.errors);
   }
+});
+
+const advanceFilters = (req) => {
+  const { department, staff, startMonth, endMonth, status } = req.query;
+  return { office: req.admin.office, department, staff, startMonth, endMonth, status };
+};
+
+export const getAdvanceReport = expressAsyncHandler(async (req, res) => {
+  const data = await generateAdvanceReport(advanceFilters(req));
+  return new ApiResponse(200, data, 'Advance report fetched successfully.').send(res);
+});
+
+export const getAdvanceReportDetail = expressAsyncHandler(async (req, res) => {
+  const data = await getAdvanceDetail(req.admin.office, req.params.advanceId);
+  if (!data) throw new ApiError(404, 'Not Found!', 'Advance not found.');
+  return new ApiResponse(200, data, 'Advance details fetched successfully.').send(res);
+});
+
+export const getAdvanceReportPdf = expressAsyncHandler(async (req, res) => {
+  const filters = advanceFilters(req);
+  const [groups, office] = await Promise.all([
+    generateAdvanceReport(filters),
+    Office.findById(req.admin.office).select('name').lean(),
+  ]);
+  if (!groups.length) throw new ApiError(404, 'Not Found!', 'No advance records found for the given filters.');
+
+  const pdfBuffer = await generateAdvanceReportPdf(office?.name || '', groups, filters);
+  res.setHeader('Content-Type', 'application/pdf');
+  res.setHeader('Content-Disposition', 'inline; filename="advance_report.pdf"');
+  res.send(Buffer.from(pdfBuffer));
+});
+
+export const getAdvanceReportExcel = expressAsyncHandler(async (req, res) => {
+  const filters = advanceFilters(req);
+  const [groups, office] = await Promise.all([
+    generateAdvanceReport(filters),
+    Office.findById(req.admin.office).select('name').lean(),
+  ]);
+  if (!groups.length) throw new ApiError(404, 'Not Found!', 'No advance records found for the given filters.');
+
+  const excelBuffer = await generateAdvanceReportExcel(office?.name || '', groups, filters);
+  res.setHeader('Content-Type', 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet');
+  res.setHeader('Content-Disposition', 'attachment; filename="advance_report.xlsx"');
+  res.send(Buffer.from(excelBuffer));
+});
+
+export const getAdvanceReportDetailPdf = expressAsyncHandler(async (req, res) => {
+  const [record, office] = await Promise.all([
+    getAdvanceDetail(req.admin.office, req.params.advanceId),
+    Office.findById(req.admin.office).select('name').lean(),
+  ]);
+  if (!record) throw new ApiError(404, 'Not Found!', 'Advance not found.');
+
+  const pdfBuffer = await generateAdvanceDetailPdf(office?.name || '', record);
+  res.setHeader('Content-Type', 'application/pdf');
+  res.setHeader('Content-Disposition', `inline; filename="advance_${record.advanceNo}.pdf"`);
+  res.send(Buffer.from(pdfBuffer));
 });

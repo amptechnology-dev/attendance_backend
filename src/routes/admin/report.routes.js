@@ -20,6 +20,11 @@ import {
   getHolidayFundReport,
   getHolidayFundReportPdf,
   getHolidayFundReportCsv,
+  getAdvanceReport,
+  getAdvanceReportPdf,
+  getAdvanceReportExcel,
+  getAdvanceReportDetail,
+  getAdvanceReportDetailPdf
 } from '../../controllers/admin/report.controller.js';
 const router = Router();
 
@@ -43,5 +48,10 @@ router.route('/esi-ecr-csv').get(getEsiEcrCsv);
 router.route('/holiday-fund').get(getHolidayFundReport);
 router.route('/holiday-fund-pdf').get(getHolidayFundReportPdf);
 router.route('/holiday-fund-csv').get(getHolidayFundReportCsv);
+router.route('/advance').get(getAdvanceReport);
+router.route('/advance/pdf').get(getAdvanceReportPdf);
+router.route('/advance/excel').get(getAdvanceReportExcel);
+router.route('/advance/:advanceId/pdf').get(getAdvanceReportDetailPdf);
+router.route('/advance/:advanceId').get(getAdvanceReportDetail);
 
 export default router;

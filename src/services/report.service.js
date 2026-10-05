@@ -1,11 +1,13 @@
 import { Attendance } from '../models/attendance.model.js';
-import { Salary ,SalaryStructure} from '../models/salary.model.js';
+import { Salary, SalaryStructure, AdvanceTransaction } from '../models/salary.model.js';
 import { jsPDF } from 'jspdf';
+import ExcelJS from 'exceljs';
 import autoTable from 'jspdf-autotable';
 import { format, startOfYear, endOfYear } from 'date-fns';
 import { writeToString } from 'fast-csv';
 import { Leave } from '../models/leave.model.js';
 import { Office } from '../models/office.model.js';
+import { Staff } from '../models/staff.model.js';
 import { HolidayFund } from '../models/holidayFund.model.js';
 import voca from 'voca';
 
@@ -1714,4 +1716,532 @@ export const generateHolidayFundReportCsv = async (data) => {
   // Generate CSV string
   const csvString = await writeToString(rows, { headers });
   return csvString;
+};
+
+// ======================= ADVANCE REPORT =======================
+const advDate = (d) => (d ? format(new Date(d), 'dd/MM/yyyy') : '-');
+const advMoney = (n) => (Number(n) || 0).toFixed(2);
+const advNo = (n) => `ADV-${String(n).padStart(4, '0')}`;
+const advMonthIndex = (ym) => {
+  if (!ym) return null;
+  const [y, m] = String(ym).split('-').map(Number);
+  if (!y || !m) return null;
+  return y * 12 + (m - 1);
+};
+const advPeriodLabel = (f = {}) =>
+  f.startMonth || f.endMonth ? `${f.startMonth || 'Start'} to ${f.endMonth || 'Present'}` : 'All Time';
+
+const advThinBorder = {
+  top: { style: 'thin' },
+  left: { style: 'thin' },
+  bottom: { style: 'thin' },
+  right: { style: 'thin' },
+};
+
+// Prottek 'add' transaction = 1 ta advance. Er por theke next 'add' er age porjonto
+// 'deduct' / 'update' row gulo oi advance er.
+const buildAdvanceRecords = async (office) => {
+  const [adds, others] = await Promise.all([
+    AdvanceTransaction.find({ office, type: 'add' }).sort({ createdAt: 1 }).lean(),
+    AdvanceTransaction.find({ office, type: { $in: ['deduct', 'update'] } })
+      .sort({ createdAt: 1 })
+      .lean(),
+  ]);
+  if (!adds.length) return [];
+
+  const staffIds = [...new Set(adds.map((a) => String(a.staff)))];
+  const staffDocs = await Staff.find({ _id: { $in: staffIds } })
+    .select('staffId fullName department advanceSalary')
+    .populate('department', 'name')
+    .lean();
+  const staffMap = new Map(staffDocs.map((s) => [String(s._id), s]));
+
+  // Advance number: office-er sob advance chronological order e (stable, notun advance sob somoy sheshe boshe)
+  const addsByStaff = new Map();
+  adds.forEach((a, i) => {
+    a._no = i + 1;
+    const k = String(a.staff);
+    if (!addsByStaff.has(k)) addsByStaff.set(k, []);
+    addsByStaff.get(k).push(a);
+  });
+
+  const othersByStaff = new Map();
+  others.forEach((t) => {
+    const k = String(t.staff);
+    if (!othersByStaff.has(k)) othersByStaff.set(k, []);
+    othersByStaff.get(k).push(t);
+  });
+
+  const now = new Date();
+  const curMonth = now.getMonth() + 1;
+  const curYear = now.getFullYear();
+  const records = [];
+
+  for (const [staffKey, staffAdds] of addsByStaff) {
+    const staff = staffMap.get(staffKey);
+    if (!staff) continue;
+    const staffOthers = othersByStaff.get(staffKey) || [];
+
+    staffAdds.forEach((add, idx) => {
+      const start = new Date(add.createdAt).getTime();
+      const end = idx < staffAdds.length - 1 ? new Date(staffAdds[idx + 1].createdAt).getTime() : Infinity;
+      const windowTx = staffOthers.filter((t) => {
+        const ts = new Date(t.createdAt).getTime();
+        return ts >= start && ts < end;
+      });
+
+      // Staff e ekta-i active advance thake (latest 'add'). Purono gulo already closed.
+      const isLatest = idx === staffAdds.length - 1;
+      const adv = staff.advanceSalary;
+      const active = Boolean(isLatest && adv && Number(adv.remainingAmount) > 0);
+
+      const advanceAmount = Number(add.amount) || 0;
+      const pendingAmount = active ? Number(adv.remainingAmount) : 0;
+      const totalRepaid = Math.min(advanceAmount, Math.max(0, advanceAmount - pendingAmount));
+
+      // Last payment = last salary deduction ba remaining komiye deoa adjustment / mark-as-paid
+      const payments = windowTx.filter((t) =>
+        t.type === 'deduct' ? Number(t.amount) > 0 : Number(t.previousAmount) > Number(t.newAmount)
+      );
+      const lastPaymentDate = payments.length ? payments[payments.length - 1].createdAt : null;
+
+      let status = 'Closed';
+      if (active) {
+        const paused = (adv.pausedMonths || []).some((p) => p.month === curMonth && p.year === curYear);
+        status = paused ? 'Paused' : 'Active';
+      }
+
+      records.push({
+        _id: String(add._id),
+        advanceNo: advNo(add._no),
+        dateOfAdvance: add.dateTaken || add.createdAt,
+        staff: String(staff._id),
+        staffId: staff.staffId,
+        staffName: staff.fullName,
+        departmentId: staff.department?._id ? String(staff.department._id) : 'none',
+        departmentName: staff.department?.name || 'No Department',
+        advanceAmount,
+        totalRepaid,
+        pendingAmount,
+        lastPaymentDate,
+        remainingMonths: active ? Number(adv.remainingMonths) || 0 : 0,
+        monthlyDeduction: active ? Number(adv.monthlyDeduction) || 0 : 0,
+        pausedMonths: active ? adv.pausedMonths || [] : [],
+        status,
+        remarks: add.remarks || '',
+        transactions: [add, ...windowTx].map((t) => ({
+          _id: String(t._id),
+          type: t.type,
+          amount: t.amount,
+          month: t.month,
+          year: t.year,
+          previousAmount: t.previousAmount,
+          newAmount: t.newAmount,
+          previousMonths: t.previousMonths,
+          newMonths: t.newMonths,
+          remarks: t.remarks || '',
+          createdAt: t.createdAt,
+        })),
+      });
+    });
+  }
+
+  return records;
+};
+
+export const generateAdvanceReport = async (filters) => {
+  const { office, department, staff, startMonth, endMonth, status } = filters;
+
+  let records = await buildAdvanceRecords(office);
+
+  if (department) records = records.filter((r) => r.departmentId === String(department));
+  if (staff) records = records.filter((r) => r.staff === String(staff));
+
+  const from = advMonthIndex(startMonth);
+  const to = advMonthIndex(endMonth);
+  if (from !== null || to !== null) {
+    records = records.filter((r) => {
+      const d = new Date(r.dateOfAdvance);
+      const idx = d.getFullYear() * 12 + d.getMonth();
+      return (from === null || idx >= from) && (to === null || idx <= to);
+    });
+  }
+
+  if (status === 'active') records = records.filter((r) => r.status !== 'Closed');
+  else if (status === 'closed') records = records.filter((r) => r.status === 'Closed');
+
+  // Department wise group (attendance report er moto)
+  const groups = new Map();
+  records.forEach((r) => {
+    const { transactions, ...row } = r; // list e transactions lagbe na
+    if (!groups.has(r.departmentId)) {
+      groups.set(r.departmentId, {
+        _id: r.departmentId,
+        departmentName: r.departmentName,
+        advances: [],
+        totals: { advanceAmount: 0, totalRepaid: 0, pendingAmount: 0 },
+      });
+    }
+    const g = groups.get(r.departmentId);
+    g.advances.push(row);
+    g.totals.advanceAmount += row.advanceAmount;
+    g.totals.totalRepaid += row.totalRepaid;
+    g.totals.pendingAmount += row.pendingAmount;
+  });
+
+  return [...groups.values()]
+    .map((g) => ({
+      ...g,
+      advances: g.advances.sort(
+        (a, b) =>
+          (a.staffName || '').localeCompare(b.staffName || '') || new Date(a.dateOfAdvance) - new Date(b.dateOfAdvance)
+      ),
+    }))
+    .sort((a, b) => a.departmentName.localeCompare(b.departmentName));
+};
+
+export const getAdvanceDetail = async (office, advanceId) => {
+  const records = await buildAdvanceRecords(office);
+  return records.find((r) => r._id === String(advanceId)) || null;
+};
+
+export const generateAdvanceReportPdf = async (officeName, groups, filters = {}) => {
+  const doc = new jsPDF({ format: 'a4', orientation: 'landscape' });
+  const pageHeight = doc.internal.pageSize.height || doc.internal.pageSize.getHeight();
+  const pageWidth = doc.internal.pageSize.width || doc.internal.pageSize.getWidth();
+  const totalPagesExp = '{total_pages_count_string}';
+
+  const drawHeaderFooter = () => {
+    doc.setFontSize(22);
+    doc.setFont('times', 'bold');
+    doc.setTextColor('#1ABD9C');
+    doc.text('ADVANCE REPORT', pageWidth / 2, 15, { align: 'center' });
+
+    doc.setFontSize(14);
+    doc.setTextColor('black');
+    doc.text(officeName || '', pageWidth / 2, 22, { align: 'center' });
+    doc.setLineWidth(0.2);
+    doc.line(10, 27, pageWidth - 10, 27);
+
+    const currentPage = doc.internal.getCurrentPageInfo().pageNumber;
+    doc.setFontSize(10);
+    doc.setTextColor('gray');
+    doc.text(`Page ${currentPage} of ${totalPagesExp}`, pageWidth - 40, pageHeight - 10);
+    doc.text(`Generated: ${format(new Date(), 'dd-MM-yyyy hh:mmaa')}`, 10, pageHeight - 10);
+  };
+
+  const headers = [
+    [
+      'Sl',
+      'Adv No',
+      'Date of Advance',
+      'Staff',
+      'Advance Amt',
+      'Total Repaid',
+      'Last Payment',
+      'Pending Amt',
+      'Rem. Months',
+      'Status',
+    ],
+  ];
+
+  groups.forEach((dept, index) => {
+    if (index > 0) doc.addPage();
+
+    doc.setFontSize(12);
+    doc.setFont('times', 'bold');
+    doc.setTextColor('black');
+    doc.text(`Department: ${dept.departmentName} | Period: ${advPeriodLabel(filters)}`, 10, 35);
+
+    const rows = dept.advances.map((a, i) => [
+      i + 1,
+      a.advanceNo,
+      advDate(a.dateOfAdvance),
+      `${a.staffName}\n${a.staffId || ''}`,
+      advMoney(a.advanceAmount),
+      advMoney(a.totalRepaid),
+      advDate(a.lastPaymentDate),
+      advMoney(a.pendingAmount),
+      a.remainingMonths,
+      a.status,
+    ]);
+
+    rows.push([
+      { content: 'Total:', colSpan: 4, styles: { halign: 'right' } },
+      advMoney(dept.totals.advanceAmount),
+      advMoney(dept.totals.totalRepaid),
+      '',
+      advMoney(dept.totals.pendingAmount),
+      '',
+      '',
+    ]);
+
+    autoTable(doc, {
+      startY: 40,
+      margin: { top: 40, left: 10, right: 10, bottom: 15 },
+      head: headers,
+      body: rows,
+      theme: 'grid',
+      styles: { fontSize: 8, cellPadding: 1.5 },
+      headStyles: { fillColor: [46, 134, 171] },
+      didParseCell: (data) => {
+        if (data.section === 'body' && data.row.index === rows.length - 1) {
+          data.cell.styles.fontStyle = 'bold';
+        }
+      },
+      didDrawPage: drawHeaderFooter,
+    });
+  });
+
+  if (typeof doc.putTotalPages === 'function') {
+    doc.putTotalPages(totalPagesExp);
+  }
+
+  return doc.output('arraybuffer');
+};
+
+export const generateAdvanceReportExcel = async (officeName, groups, filters = {}) => {
+  const headers = [
+    'SL NO',
+    'ADVANCE NO',
+    'DATE OF ADVANCE',
+    'STAFF ID',
+    'STAFF NAME',
+    'DEPARTMENT',
+    'ADVANCE AMOUNT',
+    'TOTAL REPAID',
+    'LAST PAYMENT DATE',
+    'PENDING AMOUNT',
+    'REMAINING MONTHS',
+    'STATUS',
+  ];
+  const widths = [7, 13, 16, 12, 24, 18, 15, 14, 18, 15, 16, 10];
+  const colCount = headers.length;
+
+  const workbook = new ExcelJS.Workbook();
+  const sheet = workbook.addWorksheet('Advance Report');
+  widths.forEach((w, i) => (sheet.getColumn(i + 1).width = w));
+
+  const fill = (argb) => ({ type: 'pattern', pattern: 'solid', fgColor: { argb } });
+
+  sheet.mergeCells(1, 1, 1, colCount);
+  const titleCell = sheet.getCell(1, 1);
+  titleCell.value = (officeName || 'COMPANY NAME').toUpperCase();
+  titleCell.font = { bold: true, size: 13 };
+  titleCell.alignment = { horizontal: 'center', vertical: 'middle' };
+  titleCell.fill = fill('FFB39DDB');
+  sheet.getRow(1).height = 20;
+
+  sheet.mergeCells(2, 1, 2, colCount);
+  const subCell = sheet.getCell(2, 1);
+  subCell.value = `ADVANCE REPORT (${advPeriodLabel(filters)})`;
+  subCell.font = { bold: true, size: 10, color: { argb: 'FFFFFFFF' } };
+  subCell.alignment = { horizontal: 'center', vertical: 'middle' };
+  subCell.fill = fill('FF2E86AB');
+  sheet.getRow(2).height = 16;
+
+  const headerRow = sheet.getRow(3);
+  headers.forEach((h, idx) => {
+    const cell = headerRow.getCell(idx + 1);
+    cell.value = h;
+    cell.font = { bold: true, size: 9, color: { argb: 'FFFFFFFF' } };
+    cell.alignment = { horizontal: 'center', vertical: 'middle', wrapText: true };
+    cell.fill = fill('FF2E86AB');
+    cell.border = advThinBorder;
+  });
+  headerRow.height = 24;
+
+  let r = 4;
+  const grand = { advanceAmount: 0, totalRepaid: 0, pendingAmount: 0 };
+
+  const writeTotalRow = (label, t) => {
+    sheet.mergeCells(r, 1, r, 6);
+    const row = sheet.getRow(r);
+    const labelCell = row.getCell(1);
+    labelCell.value = label;
+    const values = { 7: t.advanceAmount, 8: t.totalRepaid, 10: t.pendingAmount };
+    for (let c = 1; c <= colCount; c++) {
+      const cell = row.getCell(c);
+      if (values[c] !== undefined) cell.value = values[c];
+      cell.font = { bold: true, size: 9, color: { argb: 'FFFFFFFF' } };
+      cell.alignment = { horizontal: 'center', vertical: 'middle' };
+      cell.fill = fill('FF2E86AB');
+      cell.border = advThinBorder;
+    }
+    r++;
+  };
+
+  groups.forEach((dept) => {
+    sheet.mergeCells(r, 1, r, colCount);
+    const deptCell = sheet.getCell(r, 1);
+    deptCell.value = `Department: ${dept.departmentName}`;
+    deptCell.font = { bold: true, size: 10 };
+    deptCell.alignment = { horizontal: 'left', vertical: 'middle' };
+    deptCell.fill = fill('FFE3F2FD');
+    deptCell.border = advThinBorder;
+    r++;
+
+    dept.advances.forEach((a, i) => {
+      const row = sheet.getRow(r);
+      const vals = [
+        i + 1,
+        a.advanceNo,
+        advDate(a.dateOfAdvance),
+        a.staffId || '-',
+        a.staffName,
+        a.departmentName,
+        a.advanceAmount,
+        a.totalRepaid,
+        advDate(a.lastPaymentDate),
+        a.pendingAmount,
+        a.remainingMonths,
+        a.status,
+      ];
+      vals.forEach((v, idx) => {
+        const cell = row.getCell(idx + 1);
+        cell.value = v;
+        cell.font = { size: 9 };
+        cell.border = advThinBorder;
+        cell.alignment = { horizontal: idx === 4 ? 'left' : 'center' };
+      });
+      r++;
+    });
+
+    writeTotalRow('DEPARTMENT TOTAL', dept.totals);
+    grand.advanceAmount += dept.totals.advanceAmount;
+    grand.totalRepaid += dept.totals.totalRepaid;
+    grand.pendingAmount += dept.totals.pendingAmount;
+  });
+
+  if (groups.length > 1) writeTotalRow('GRAND TOTAL', grand);
+
+  return workbook.xlsx.writeBuffer();
+};
+
+// ======================= ADVANCE DETAIL PDF =======================
+const advDateTime = (d) => (d ? format(new Date(d), 'dd/MM/yyyy hh:mm a') : '-');
+const advMonthLabel = (m, y) => (m && y ? format(new Date(y, m - 1, 1), 'MMM yyyy') : '-');
+// jsPDF er default font e "→" glyph nai, tai "->" use korlam
+const advArrow = (a, b) => (a === undefined && b === undefined ? '-' : `${a ?? '-'} -> ${b ?? '-'}`);
+const ADV_TYPE_LABEL = {
+  add: 'Advance Given',
+  deduct: 'Salary Deduction',
+  update: 'Adjustment / Pause',
+};
+
+export const generateAdvanceDetailPdf = async (officeName, a) => {
+  const doc = new jsPDF({ format: 'a4', orientation: 'landscape' });
+  const pageHeight = doc.internal.pageSize.height || doc.internal.pageSize.getHeight();
+  const pageWidth = doc.internal.pageSize.width || doc.internal.pageSize.getWidth();
+  const totalPagesExp = '{total_pages_count_string}';
+
+  // duita autoTable same page e draw korle header/footer jate duibar na ase
+  const drawnPages = new Set();
+  const drawHeaderFooter = () => {
+    const currentPage = doc.internal.getCurrentPageInfo().pageNumber;
+    if (drawnPages.has(currentPage)) return;
+    drawnPages.add(currentPage);
+
+    doc.setFontSize(22);
+    doc.setFont('times', 'bold');
+    doc.setTextColor('#1ABD9C');
+    doc.text('ADVANCE DETAILS', pageWidth / 2, 15, { align: 'center' });
+
+    doc.setFontSize(14);
+    doc.setTextColor('black');
+    doc.text(officeName || '', pageWidth / 2, 22, { align: 'center' });
+    doc.setLineWidth(0.2);
+    doc.line(10, 27, pageWidth - 10, 27);
+
+    doc.setFontSize(10);
+    doc.setTextColor('gray');
+    doc.text(`Page ${currentPage} of ${totalPagesExp}`, pageWidth - 40, pageHeight - 10);
+    doc.text(`Generated: ${format(new Date(), 'dd-MM-yyyy hh:mmaa')}`, 10, pageHeight - 10);
+  };
+
+  // ---- Title line ----
+  doc.setFontSize(12);
+  doc.setFont('times', 'bold');
+  doc.setTextColor('black');
+  doc.text(`Advance No: ${a.advanceNo} | Status: ${a.status}`, 10, 35);
+
+  // ---- Summary (label | value | label | value) ----
+  const summary = [
+    ['Staff', `${a.staffName} (${a.staffId || '-'})`],
+    ['Department', a.departmentName],
+    ['Date of Advance', advDate(a.dateOfAdvance)],
+    ['Advance Amount', advMoney(a.advanceAmount)],
+    ['Total Repayment Made', advMoney(a.totalRepaid)],
+    ['Pending Amount', advMoney(a.pendingAmount)],
+    ['Last Payment Date', advDate(a.lastPaymentDate)],
+    ['Remaining Months', String(a.remainingMonths ?? 0)],
+    ['Monthly Deduction', advMoney(a.monthlyDeduction)],
+    ['Remarks', a.remarks || '-'],
+  ];
+  const summaryRows = [];
+  for (let i = 0; i < summary.length; i += 2) {
+    summaryRows.push([...summary[i], ...(summary[i + 1] || ['', ''])]);
+  }
+
+  autoTable(doc, {
+    startY: 40,
+    margin: { top: 50, left: 10, right: 10, bottom: 15 },
+    body: summaryRows,
+    theme: 'grid',
+    styles: { fontSize: 9, cellPadding: 2 },
+    columnStyles: {
+      0: { fontStyle: 'bold', fillColor: [226, 232, 240], cellWidth: 45 },
+      2: { fontStyle: 'bold', fillColor: [226, 232, 240], cellWidth: 45 },
+    },
+    didDrawPage: drawHeaderFooter,
+  });
+
+  let y = doc.lastAutoTable.finalY + 8;
+
+  // ---- Paused months ----
+  if (a.pausedMonths?.length > 0) {
+    doc.setFont('times', 'bold');
+    doc.setFontSize(10);
+    doc.setTextColor('black');
+    doc.text(`Paused months: ${a.pausedMonths.map((p) => advMonthLabel(p.month, p.year)).join(', ')}`, 10, y);
+    y += 7;
+  }
+
+  // ---- Transaction history ----
+  if (y > pageHeight - 40) {
+    doc.addPage();
+    y = 40;
+  }
+  doc.setFont('times', 'bold');
+  doc.setFontSize(12);
+  doc.setTextColor('black');
+  doc.text('Transaction History', 10, y);
+
+  const rows = (a.transactions || []).map((t) => [
+    advDateTime(t.createdAt),
+    ADV_TYPE_LABEL[t.type] || t.type,
+    advMonthLabel(t.month, t.year),
+    advMoney(t.amount),
+    advArrow(t.previousAmount, t.newAmount),
+    advArrow(t.previousMonths, t.newMonths),
+    t.remarks || '-',
+  ]);
+
+  autoTable(doc, {
+    startY: y + 3,
+    margin: { top: 50, left: 10, right: 10, bottom: 15 },
+    head: [['Date', 'Type', 'Salary Month', 'Amount', 'Remaining Amt (Old -> New)', 'Months (Old -> New)', 'Remarks']],
+    body: rows,
+    theme: 'grid',
+    styles: { fontSize: 8, cellPadding: 1.5 },
+    headStyles: { fillColor: [46, 134, 171] },
+    columnStyles: { 3: { halign: 'right' } },
+    didDrawPage: drawHeaderFooter,
+  });
+
+  if (typeof doc.putTotalPages === 'function') {
+    doc.putTotalPages(totalPagesExp);
+  }
+
+  return doc.output('arraybuffer');
 };
