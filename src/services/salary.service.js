@@ -17,6 +17,78 @@ import { ApiError } from '../utils/responseHandler.js';
 import { Admin } from '../models/admin.model.js';
 import axios from 'axios';
 
+const sumAmount = (list) => list.reduce((sum, t) => sum + (t.amount || 0), 0);
+
+async function reverseAdvanceDeductionForMonth(staff, month, year) {
+  const latestAdd = await AdvanceTransaction.findOne({ staff: staff._id, type: 'add' }).sort({ createdAt: -1 }).lean();
+
+  const deductions = await AdvanceTransaction.find({
+    staff: staff._id,
+    type: 'deduct',
+    month,
+    year,
+  }).lean();
+
+  // Shudhu current advance-er deduction reverse hobe (purono advance er na)
+  const toReverse = deductions.filter((t) => !latestAdd || new Date(t.createdAt) >= new Date(latestAdd.createdAt));
+  if (!toReverse.length) return 0;
+
+  const total = sumAmount(toReverse);
+  if (total <= 0) return 0;
+
+  // Last installment kete advance record muche gele, abar toiri kori
+  if (!staff.advanceSalary) {
+    if (!latestAdd) return 0;
+    staff.advanceSalary = {
+      totalAmount: latestAdd.amount,
+      remainingAmount: 0,
+      remainingMonths: 0,
+      monthlyDeduction: toReverse[0].amount,
+      dateTaken: latestAdd.dateTaken || latestAdd.createdAt,
+      startMonth: latestAdd.startMonth,
+      startYear: latestAdd.startYear,
+      pausedMonths: [],
+      remarks: latestAdd.remarks,
+    };
+  }
+
+  const adv = staff.advanceSalary;
+  adv.remainingAmount = (adv.remainingAmount || 0) + total;
+  adv.remainingMonths = (adv.remainingMonths || 0) + toReverse.length;
+  if (!adv.monthlyDeduction) {
+    adv.monthlyDeduction = Math.ceil(adv.remainingAmount / adv.remainingMonths);
+  }
+
+  await AdvanceTransaction.deleteMany({ _id: { $in: toReverse.map((t) => t._id) } });
+
+  return total;
+}
+
+/**
+ * Already-calculated payslip theke advance deduction bad dey, TD ar Net update kore.
+ */
+async function removeAdvanceFromPayslip(officeId, staffId, month, year, amount) {
+  const salary = await Salary.findOne({ office: officeId, staff: staffId, month, year }).lean();
+  if (!salary) return;
+
+  const current = salary.breakdown?.advanceDeduction ?? 0;
+  if (current <= 0) return;
+
+  const cut = Math.min(current, amount);
+  const newAdvance = current - cut;
+  const newDeductions = Math.max(0, Math.round((salary.deductions ?? 0) - cut));
+  const newNet = Math.round(salary.grossSalary - newDeductions);
+
+  const update = { $set: { deductions: newDeductions, netSalary: newNet } };
+  if (newAdvance > 0) {
+    update.$set['breakdown.advanceDeduction'] = newAdvance;
+  } else {
+    update.$unset = { 'breakdown.advanceDeduction': '' };
+  }
+
+  await Salary.updateOne({ _id: salary._id }, update);
+}
+
 export const assertSalaryNotLocked = async (officeId, month, year) => {
   const lock = await SalaryCalculation.findOne({ office: officeId, month, year, locked: true });
   if (lock) {
@@ -714,6 +786,12 @@ export const saveAdvanceSalary = async ({
     await assertSalaryNotLocked(staff.office, Number(lockMonth), Number(lockYear));
   }
 
+  // Pause/un-pause korar month frozen hole block hobe
+  for (const pm of [pauseMonth, removePauseMonth].filter(Boolean)) {
+    const [py, pmth] = pm.split('-').map(Number);
+    await assertSalaryNotLocked(staff.office, pmth, py);
+  }
+
   if (action === 'add') {
     if (staff.advanceSalary && staff.advanceSalary.remainingAmount > 0) {
       throw new ApiError(400, 'Unpaid advance found!', [
@@ -790,6 +868,10 @@ export const saveAdvanceSalary = async ({
       }
     }
 
+    let reversedOnPause = 0;
+    let reversedMonth = null;
+    let reversedYear = null;
+
     if (staff.advanceSalary) {
       if (remarks !== undefined) staff.advanceSalary.remarks = remarks;
 
@@ -806,6 +888,11 @@ export const saveAdvanceSalary = async ({
         if (!alreadyPaused) {
           staff.advanceSalary.pausedMonths.push({ month: pMonth, year: pYear });
         }
+
+        // Ei month e jodi age-i deduction hoye giye thake, seta reverse koro
+        reversedOnPause = await reverseAdvanceDeductionForMonth(staff, pMonth, pYear);
+        reversedMonth = pMonth;
+        reversedYear = pYear;
       }
 
       if (removePauseMonth) {
@@ -818,22 +905,30 @@ export const saveAdvanceSalary = async ({
 
     await staff.save();
 
+    // Already calculated payslip thakle, ar advance deduction bad dao
+    if (reversedOnPause > 0) {
+      await removeAdvanceFromPayslip(staff.office, staffId, reversedMonth, reversedYear, reversedOnPause);
+    }
+
+    const finalRemaining = staff.advanceSalary?.remainingAmount ?? (hasAmountChange ? 0 : oldRemaining);
+    const finalMonths = staff.advanceSalary?.remainingMonths ?? (hasAmountChange ? 0 : oldMonths);
+
     await AdvanceTransaction.create({
       office: staff.office,
       staff: staffId,
       type: 'update',
-      amount: hasAmountChange ? Math.abs(Number(remainingAmount) - oldRemaining) : 0,
+      amount: hasAmountChange ? Math.abs(Number(remainingAmount) - oldRemaining) : reversedOnPause,
       remarks:
         remarks ||
         (pauseMonth
-          ? `Paused deduction for ${pauseMonth}`
+          ? `Paused deduction for ${pauseMonth}${reversedOnPause > 0 ? ` (${reversedOnPause} deduction reversed)` : ''}`
           : removePauseMonth
             ? `Un-paused deduction for ${removePauseMonth}`
             : ''),
       previousAmount: oldRemaining,
-      newAmount: hasAmountChange ? Math.max(0, Number(remainingAmount)) : oldRemaining,
+      newAmount: hasAmountChange ? Math.max(0, Number(remainingAmount)) : finalRemaining,
       previousMonths: oldMonths,
-      newMonths: hasAmountChange ? Math.max(0, Number(remainingMonths)) : oldMonths,
+      newMonths: hasAmountChange ? Math.max(0, Number(remainingMonths)) : finalMonths,
     });
 
     return staff.advanceSalary;
@@ -877,34 +972,22 @@ export const saveAdvanceSalary = async (staffId, totalAmount, remainingAmount, r
 };
 */
 // Deduct advance salary
+// Deduct advance salary
 async function deductAdvanceSalary(staffId, month = null, year = null, allowNewDeduction = true) {
   const staff = await Staff.findById(staffId);
   if (!staff) return 0;
 
-  // Ei month e ager joto deduction hoyeche (ekta month e ekadhik advance-er deduction thakte pare)
-  const existingDeductions = await AdvanceTransaction.find({
-    staff: staffId,
-    type: 'deduct',
-    month,
-    year,
-  }).lean();
-  const alreadyDeducted = existingDeductions.reduce((sum, t) => sum + (t.amount || 0), 0);
-
   const adv = staff.advanceSalary;
 
-  if (!allowNewDeduction || !adv || !adv.remainingAmount || adv.remainingMonths <= 0) {
-    return alreadyDeducted;
-  }
+  // ---- PAUSED MONTH: sobar age check. Kono deduction hobe na, age hoye thakle reverse hobe ----
+  const isPausedThisMonth = !!adv && (adv.pausedMonths || []).some((p) => p.month === month && p.year === year);
 
-  const currentPeriod = year * 12 + (month - 1);
-
-  if (adv.startYear && adv.startMonth) {
-    const startPeriod = adv.startYear * 12 + (adv.startMonth - 1);
-    if (currentPeriod < startPeriod) return alreadyDeducted;
-  }
-
-  const isPausedThisMonth = (adv.pausedMonths || []).some((p) => p.month === month && p.year === year);
   if (isPausedThisMonth) {
+    const reversed = await reverseAdvanceDeductionForMonth(staff, month, year);
+    if (reversed > 0) {
+      await staff.save();
+    }
+
     const alreadyLogged = await AdvanceTransaction.findOne({
       staff: staffId,
       type: 'update',
@@ -927,12 +1010,39 @@ async function deductAdvanceSalary(staffId, month = null, year = null, allowNewD
         logger.error('Error while logging paused advance month:', error);
       }
     }
+
+    // Reverse korar por je deduction (onno/purono advance er) baki ache shetai return hobe
+    const leftover = await AdvanceTransaction.find({
+      staff: staffId,
+      type: 'deduct',
+      month,
+      year,
+    }).lean();
+    return sumAmount(leftover);
+  }
+
+  // Ei month e ager joto deduction hoyeche (ekta month e ekadhik advance-er deduction thakte pare)
+  const existingDeductions = await AdvanceTransaction.find({
+    staff: staffId,
+    type: 'deduct',
+    month,
+    year,
+  }).lean();
+  const alreadyDeducted = sumAmount(existingDeductions);
+
+  if (!allowNewDeduction || !adv || !adv.remainingAmount || adv.remainingMonths <= 0) {
     return alreadyDeducted;
+  }
+
+  const currentPeriod = year * 12 + (month - 1);
+
+  if (adv.startYear && adv.startMonth) {
+    const startPeriod = adv.startYear * 12 + (adv.startMonth - 1);
+    if (currentPeriod < startPeriod) return alreadyDeducted;
   }
 
   // Current advance er deduction ei month e ager-i hoyeche kina?
   // Latest 'add' er por je deduction hoyeche shetai current advance er.
-  // Er age-r deduction purono advance er, seta notun advance ke block korbe na.
   const latestAdd = await AdvanceTransaction.findOne({ staff: staffId, type: 'add' }).sort({ createdAt: -1 }).lean();
 
   const currentAdvanceAlreadyDeducted = existingDeductions.some(
