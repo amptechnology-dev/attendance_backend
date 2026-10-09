@@ -3,6 +3,7 @@ import expressAsyncHandler from 'express-async-handler';
 import { Admin } from '../models/admin.model.js';
 import { Staff } from '../models/staff.model.js';
 import { ApiError } from '../utils/responseHandler.js';
+import { SuperAdmin } from '../models/superAdmin.model.js';
 
 /*
 export const verifyJWT = asyncHandler(async (req, res, next) => {
@@ -50,6 +51,36 @@ export const publicApiAuth = asyncHandler(async (req, res, next) => {
   }
 });
 */
+
+export const superAdminAuth = expressAsyncHandler(async (req, res, next) => {
+  const token =
+    req.signedCookies?.accessToken ||
+    req.header('Authorization')?.replace('Bearer ', '');
+
+  if (!token) {
+    throw new ApiError(401, 'Unauthorized request.');
+  }
+
+  let decoded;
+  try {
+    // secret er nam tomar adminAuth a ja ache hubohu seta-i dao
+    decoded = jwt.verify(token, process.env.ACCESS_TOKEN_SECRET);
+  } catch (error) {
+    throw new ApiError(401, 'Invalid or expired token.');
+  }
+
+  if (decoded.type !== 'superadmin') {
+    throw new ApiError(403, 'Forbidden: super admin access only.');
+  }
+
+  const superAdmin = await SuperAdmin.findById(decoded._id);
+  if (!superAdmin) {
+    throw new ApiError(401, 'Super admin not found.');
+  }
+
+  req.superAdmin = superAdmin;
+  next();
+});
 
 export const adminAuth = expressAsyncHandler(async (req, res, next) => {
   try {

@@ -31,6 +31,7 @@ import attendanceRouter from './routes/attendance.routes.js';
 import salaryRouter from './routes/salary.routes.js';
 import staffRouter from './routes/staff.routes.js';
 import logsRouter from './routes/admin/logs.routes.js';
+import superAdminRoutes from './routes/superAdmin.routes.js';
 
 //routes declaration
 app.use('/api', publicRouter);
@@ -41,6 +42,7 @@ app.use('/api/attendance', attendanceRouter);
 app.use('/api/salary', salaryRouter);
 app.use('/api/staff', staffRouter);
 app.use('/api/logs', logsRouter);
+app.use('/api/super-admin', superAdminRoutes);
 
 // Global Error Handler
 app.use(errorHandler);

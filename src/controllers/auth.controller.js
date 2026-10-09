@@ -8,6 +8,71 @@ import { logUserLogin } from '../utils/loginLogger.js';
 import { generateOtp } from '../utils/randomStringGenarator.js';
 import axios from 'axios';
 import { Office } from '../models/office.model.js';
+import { SuperAdmin } from '../models/superAdmin.model.js';
+
+export const superAdminLogin = expressAsyncHandler(async (req, res) => {
+  const { username, password } = req.body;
+  if (!username || !password) {
+    throw new ApiError(400, 'username and password are required.');
+  }
+
+  const ip = req.ip;
+  const userAgent = req.headers['user-agent'];
+  const hostname = req.hostname;
+  const requestUrl = req.originalUrl;
+
+  const superAdmin = await SuperAdmin.findOne({ username }).select('+password');
+  const isPasswordValid = superAdmin ? await superAdmin.isPasswordCorrect(password) : false;
+
+  if (!isPasswordValid) {
+    logUserLogin({
+      username,
+      userId: superAdmin?._id,
+      ip,
+      hostname,
+      userAgent,
+      requestUrl,
+      status: 'fail',
+      authType: 'superadmin',
+    });
+    throw new ApiError(400, 'Invalid Credentials.');
+  }
+
+  // type = 'superadmin', model = 'superadmin'
+  const accessToken = generateAccessToken(superAdmin, 'superadmin', 'superadmin', '1d');
+
+  const cookieOptions = {
+    signed: true,
+    httpOnly: true,
+    secure: process.env.NODE_ENV === 'production',
+    sameSite: process.env.NODE_ENV === 'production' ? 'none' : 'lax',
+    domain: process.env.NODE_ENV === 'production' ? process.env.COOKIE_DOMAIN : undefined,
+  };
+  res.cookie('accessToken', accessToken, cookieOptions);
+
+  logUserLogin({
+    username,
+    userId: superAdmin._id,
+    ip,
+    hostname,
+    userAgent,
+    requestUrl,
+    status: 'success',
+    authType: 'superadmin',
+    role: 'Super Admin',
+  });
+
+  return new ApiResponse(
+    200,
+    { username, accessToken, type: 'superadmin' },
+    'Super admin logged in successfully.'
+  ).send(res);
+});
+
+export const superAdminLogout = expressAsyncHandler(async (req, res) => {
+  res.clearCookie('accessToken');
+  return new ApiResponse(200, null, 'Super admin logged out successfully.').send(res);
+});
 
 export const getAllOffices = expressAsyncHandler(async (req, res) => {
   const offices = await Office.find().select('name');
