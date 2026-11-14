@@ -1,5 +1,5 @@
 import mongoose from 'mongoose';
-import bcrypt from 'bcrypt'; 
+import bcrypt from 'bcrypt';
 
 const superAdminSchema = new mongoose.Schema(
   {
@@ -14,6 +14,16 @@ const superAdminSchema = new mongoose.Schema(
       required: true,
       select: false,
     },
+    mobile: {
+      type: String,
+      unique: true,
+      sparse: true,
+      trim: true,
+      match: /^[6-9]\d{9}$/,
+    },
+    otp: { type: String, select: false },
+    otpExpires: { type: Date, select: false },
+    otpAttempts: { type: Number, default: 0, select: false },
   },
   { timestamps: true }
 );

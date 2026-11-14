@@ -9,11 +9,47 @@ import { generateOtp } from '../utils/randomStringGenarator.js';
 import axios from 'axios';
 import { Office } from '../models/office.model.js';
 import { SuperAdmin } from '../models/superAdmin.model.js';
+import crypto from 'crypto';
+
+const MAX_OTP_ATTEMPTS = 5;
+
+const getCookieOptions = () => ({
+  signed: true,
+  httpOnly: true,
+  secure: process.env.NODE_ENV === 'production',
+  sameSite: process.env.NODE_ENV === 'production' ? 'none' : 'lax',
+  domain: process.env.NODE_ENV === 'production' ? process.env.COOKIE_DOMAIN : undefined,
+});
+
+const sendOtpSms = async (mobile, otp) => {
+  const message = `${otp} is your OTP to login into AMP Attendance. Please do not share this OTP with anyone.- AMPTECH`;
+  const params = {
+    username: 'MTECHTRANS',
+    apikey: '38892-B2424',
+    apirequest: 'Text',
+    sender: 'AMPTCH',
+    mobile,
+    message,
+    route: 'TRANS',
+    TemplateID: '1407172715834228636',
+    format: 'JSON',
+  };
+
+  const smsResponse = await axios.get('http://text.mboxsolution.com/sms-panel/api/http/index.php', {
+    params,
+    timeout: 10000,
+  });
+
+  if (smsResponse.data?.status !== 'success') {
+    console.error('Failed to send SMS:', smsResponse.data);
+    throw new ApiError(500, 'Failed to send SMS.', [{ message: 'Failed to send SMS' }]);
+  }
+};
 
 export const superAdminLogin = expressAsyncHandler(async (req, res) => {
-  const { username, password } = req.body;
-  if (!username || !password) {
-    throw new ApiError(400, 'username and password are required.');
+  const { username, password, otp } = req.body;
+  if (!username) {
+    throw new ApiError(400, 'username is required.');
   }
 
   const ip = req.ip;
@@ -21,51 +57,86 @@ export const superAdminLogin = expressAsyncHandler(async (req, res) => {
   const hostname = req.hostname;
   const requestUrl = req.originalUrl;
 
-  const superAdmin = await SuperAdmin.findOne({ username }).select('+password');
-  const isPasswordValid = superAdmin ? await superAdmin.isPasswordCorrect(password) : false;
+  const logBase = { username, ip, hostname, userAgent, requestUrl, authType: 'superadmin' };
 
+  const superAdmin = await SuperAdmin.findOne({ username }).select(
+    '+password +otp +otpExpires +otpAttempts'
+  );
+
+  // ---------- STEP 2: OTP verify ----------
+  if (otp) {
+    const valid =
+      superAdmin &&
+      superAdmin.otp &&
+      superAdmin.otpExpires > Date.now() &&
+      superAdmin.otpAttempts < MAX_OTP_ATTEMPTS;
+
+    if (!valid) {
+      if (superAdmin?.otp) {
+        superAdmin.otpAttempts += 1;
+        await superAdmin.save();
+      }
+      logUserLogin({ ...logBase, userId: superAdmin?._id, status: 'fail' });
+      throw new ApiError(400, 'Invalid or expired OTP.');
+    }
+
+    // timing-safe compare
+    const a = Buffer.from(String(superAdmin.otp));
+    const b = Buffer.from(String(otp));
+    const match = a.length === b.length && crypto.timingSafeEqual(a, b);
+
+    if (!match) {
+      superAdmin.otpAttempts += 1;
+      await superAdmin.save();
+      logUserLogin({ ...logBase, userId: superAdmin._id, status: 'fail' });
+      throw new ApiError(400, 'Invalid or expired OTP.');
+    }
+
+    // OTP valid -> clear and issue token
+    superAdmin.otp = undefined;
+    superAdmin.otpExpires = undefined;
+    superAdmin.otpAttempts = 0;
+    await superAdmin.save();
+
+    const accessToken = generateAccessToken(superAdmin, 'superadmin', 'superadmin', '1d');
+    res.cookie('accessToken', accessToken, getCookieOptions());
+
+    logUserLogin({ ...logBase, userId: superAdmin._id, status: 'success', role: 'Super Admin' });
+
+    return new ApiResponse(
+      200,
+      { username, accessToken, type: 'superadmin' },
+      'Super admin logged in successfully.'
+    ).send(res);
+  }
+
+  // ---------- STEP 1: password verify + OTP send ----------
+  if (!password) {
+    throw new ApiError(400, 'password is required.');
+  }
+
+  const isPasswordValid = superAdmin ? await superAdmin.isPasswordCorrect(password) : false;
   if (!isPasswordValid) {
-    logUserLogin({
-      username,
-      userId: superAdmin?._id,
-      ip,
-      hostname,
-      userAgent,
-      requestUrl,
-      status: 'fail',
-      authType: 'superadmin',
-    });
+    logUserLogin({ ...logBase, userId: superAdmin?._id, status: 'fail' });
     throw new ApiError(400, 'Invalid Credentials.');
   }
 
-  // type = 'superadmin', model = 'superadmin'
-  const accessToken = generateAccessToken(superAdmin, 'superadmin', 'superadmin', '1d');
+  if (!superAdmin.mobile) {
+    throw new ApiError(400, 'Mobile number is not configured for this account.');
+  }
 
-  const cookieOptions = {
-    signed: true,
-    httpOnly: true,
-    secure: process.env.NODE_ENV === 'production',
-    sameSite: process.env.NODE_ENV === 'production' ? 'none' : 'lax',
-    domain: process.env.NODE_ENV === 'production' ? process.env.COOKIE_DOMAIN : undefined,
-  };
-  res.cookie('accessToken', accessToken, cookieOptions);
+  const newOtp = crypto.randomInt(100000, 1000000).toString();
+  superAdmin.otp = newOtp;
+  superAdmin.otpExpires = new Date(Date.now() + 5 * 60 * 1000);
+  superAdmin.otpAttempts = 0;
+  await superAdmin.save();
 
-  logUserLogin({
-    username,
-    userId: superAdmin._id,
-    ip,
-    hostname,
-    userAgent,
-    requestUrl,
-    status: 'success',
-    authType: 'superadmin',
-    role: 'Super Admin',
-  });
+  await sendOtpSms(superAdmin.mobile, newOtp);
 
   return new ApiResponse(
     200,
-    { username, accessToken, type: 'superadmin' },
-    'Super admin logged in successfully.'
+    { message: 'OTP sent to your mobile number.', username },
+    'OTP sent successfully.'
   ).send(res);
 });
 
