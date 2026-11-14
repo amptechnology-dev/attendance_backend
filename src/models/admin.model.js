@@ -30,6 +30,7 @@ const adminSchema = new mongoose.Schema(
     },
     otp: Number,
     otpExpires: Date,
+    otpAttempts: { type: Number, default: 0 },
     otpPurpose: { type: String, enum: ['login', 'unfreeze'] },
     otpContext: String,
   },

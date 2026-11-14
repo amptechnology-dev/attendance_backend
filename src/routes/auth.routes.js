@@ -13,6 +13,11 @@ import {
   superAdminLogout,
 } from '../controllers/auth.controller.js';
 import { adminAuth } from '../middlewares/auth.middleware.js';
+import {
+  forgotPasswordSendOtp,
+  forgotPasswordVerifyOtp,
+  forgotPasswordReset,
+} from '../controllers/auth.controller.js';
 
 const router = Router();
 
@@ -29,5 +34,9 @@ router.route('/staff').post(staffLogin);
 router.route('/staff/refresh-token').post(refreshStaffTokens);
 router.route('/staff/forget-password').post(sendOTPAtMobile);
 router.route('/staff/reset-password').post(resetStaffPassword);
+
+router.post('/forgot-password/send-otp', forgotPasswordSendOtp);
+router.post('/forgot-password/verify-otp', forgotPasswordVerifyOtp);
+router.post('/forgot-password/reset', forgotPasswordReset);
 
 export default router;

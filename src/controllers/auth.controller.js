@@ -10,6 +10,7 @@ import axios from 'axios';
 import { Office } from '../models/office.model.js';
 import { SuperAdmin } from '../models/superAdmin.model.js';
 import crypto from 'crypto';
+import jwt from 'jsonwebtoken';
 
 const MAX_OTP_ATTEMPTS = 5;
 
@@ -471,4 +472,181 @@ export const resetAdminPassword = expressAsyncHandler(async (req, res) => {
   admin.password = undefined;
   res.clearCookie('accessToken');
   return new ApiResponse(200, admin, 'Password reset successfully.').send(res);
+});
+
+// ================= FORGOT PASSWORD (admin + superadmin) =================
+const RESET_OTP_TTL = 5 * 60 * 1000;
+const RESEND_COOLDOWN = 60 * 1000;
+const MOBILE_REGEX = /^[6-9]\d{9}$/;
+const RESET_MODELS = { admin: Admin, superadmin: SuperAdmin };
+
+// token single-use korar jonno: password change hole fingerprint badle jabe
+const pwFingerprint = (hash) =>
+  crypto.createHash('sha256').update(hash).digest('hex').slice(0, 16);
+
+// username + mobile + type validate (string check NoSQL injection thekeo bachay)
+const validateIdentity = ({ username, mobile, type }) => {
+  if (typeof type !== 'string' || !Object.hasOwn(RESET_MODELS, type)) {
+    throw new ApiError(400, 'Invalid account type.');
+  }
+  if (typeof username !== 'string' || !username.trim() || username.trim().length > 50) {
+    throw new ApiError(400, 'Enter a valid username.');
+  }
+  if (!MOBILE_REGEX.test(String(mobile || ''))) {
+    throw new ApiError(400, 'Enter a valid 10-digit mobile number.');
+  }
+  return { username: username.trim(), mobile: String(mobile), type };
+};
+
+// username AND mobile duitai match korte hobe
+const findResetAccount = ({ username, mobile, type }) =>
+  RESET_MODELS[type]
+    .findOne({ username, mobile })
+    .select('+password +otp +otpExpires +otpAttempts');
+
+// STEP 1: send OTP
+export const forgotPasswordSendOtp = expressAsyncHandler(async (req, res) => {
+  const identity = validateIdentity(req.body);
+  const { username, mobile, type } = identity;
+
+  const account = await findResetAccount(identity);
+
+  if (account) {
+    // resend cooldown (otpExpires - TTL = last sent time)
+    if (account.otpExpires) {
+      const sentAt = account.otpExpires.getTime() - RESET_OTP_TTL;
+      if (Date.now() - sentAt < RESEND_COOLDOWN) {
+        throw new ApiError(429, 'Please wait a minute before requesting another OTP.');
+      }
+    }
+
+    const otp = crypto.randomInt(100000, 1000000).toString();
+    account.otp = otp;
+    account.otpExpires = new Date(Date.now() + RESET_OTP_TTL);
+    account.otpAttempts = 0;
+    await account.save();
+
+    await sendOtpSms(account.mobile, otp);
+
+    if (type === 'admin') {
+      await Office.updateOne({ _id: account.office }, { $inc: { smsCount: 1 } });
+    }
+  }
+
+  // account na thakleo same response (user enumeration rokhe)
+  return new ApiResponse(
+    200,
+    { mobile, username },
+    'If the details are correct, an OTP has been sent.'
+  ).send(res);
+});
+
+// STEP 2: verify OTP -> resetToken
+export const forgotPasswordVerifyOtp = expressAsyncHandler(async (req, res) => {
+  const identity = validateIdentity(req.body);
+  const { otp } = req.body;
+  const { type } = identity;
+
+  if (!/^\d{6}$/.test(String(otp || ''))) {
+    throw new ApiError(400, 'A valid 6-digit otp is required.');
+  }
+
+  const account = await findResetAccount(identity);
+
+  const attempts = account?.otpAttempts || 0;
+  if (
+    !account ||
+    !account.otp ||
+    !account.otpExpires ||
+    account.otpExpires < Date.now() ||
+    attempts >= MAX_OTP_ATTEMPTS
+  ) {
+    throw new ApiError(400, 'Invalid or expired OTP.');
+  }
+
+  const a = Buffer.from(String(account.otp));
+  const b = Buffer.from(String(otp));
+  if (a.length !== b.length || !crypto.timingSafeEqual(a, b)) {
+    account.otpAttempts = attempts + 1;
+    await account.save();
+    throw new ApiError(400, 'Invalid or expired OTP.');
+  }
+
+  // OTP valid -> clear
+  account.otp = undefined;
+  account.otpExpires = undefined;
+  account.otpAttempts = 0;
+  await account.save();
+
+  const resetToken = jwt.sign(
+    {
+      _id: account._id,
+      type: 'password-reset', // auth middleware-e ei type pass korbe na
+      model: type,
+      pf: pwFingerprint(account.password),
+    },
+    process.env.ACCESS_TOKEN_SECRET,
+    { expiresIn: '10m' }
+  );
+
+  return new ApiResponse(200, { resetToken }, 'OTP verified successfully.').send(res);
+});
+
+// STEP 3: set new password (token-e already specific account er _id ache)
+export const forgotPasswordReset = expressAsyncHandler(async (req, res) => {
+  const { resetToken, newPassword, confirmPassword } = req.body;
+
+  if (!resetToken || !newPassword || !confirmPassword) {
+    throw new ApiError(400, 'resetToken, newPassword and confirmPassword are required.');
+  }
+  if (newPassword !== confirmPassword) {
+    throw new ApiError(400, 'Passwords do not match.');
+  }
+  if (newPassword.length < 8) {
+    throw new ApiError(400, 'Password must be at least 8 characters.');
+  }
+
+  const expired = () => new ApiError(400, 'Reset session expired. Please start again.');
+
+  let decoded;
+  try {
+    decoded = jwt.verify(resetToken, process.env.ACCESS_TOKEN_SECRET);
+  } catch {
+    throw expired();
+  }
+  if (decoded.type !== 'password-reset' || !Object.hasOwn(RESET_MODELS, decoded.model)) {
+    throw expired();
+  }
+
+  const account = await RESET_MODELS[decoded.model].findById(decoded._id).select('+password');
+  if (!account || pwFingerprint(account.password) !== decoded.pf) throw expired();
+
+  account.password = newPassword; // pre-save hook hash korbe
+  await account.save();
+
+  // ---------- Auto login: same token jeta normal login e dey ----------
+  const isSuperAdmin = decoded.model === 'superadmin';
+  const authType = isSuperAdmin ? 'superadmin' : 'admin';
+
+  const accessToken = generateAccessToken(account, authType, authType, '1d');
+  res.cookie('accessToken', accessToken, getCookieOptions());
+
+  logUserLogin({
+    office: account.office, // superadmin-er office nei, undefined jabe
+    username: account.username,
+    userId: account._id,
+    ip: req.ip,
+    hostname: req.hostname,
+    userAgent: req.headers['user-agent'],
+    requestUrl: req.originalUrl,
+    status: 'success',
+    authType,
+    role: isSuperAdmin ? 'Super Admin' : 'Admin',
+  });
+
+  return new ApiResponse(
+    200,
+    { username: account.username, accessToken, type: authType },
+    'Password reset successfully.'
+  ).send(res);
 });
